@@ -6,6 +6,19 @@ void DriverUnload(PDRIVER_OBJECT DriverObject) {
     DbgPrint("[*] Hypervisor driver unloaded safely.\n");
 }
 
+bool isVmxSupported()
+{
+    constexpr static size_t CPU_ID_OUTPUT_SIZE = 4;
+    int cpuInfo[CPU_ID_OUTPUT_SIZE] = { 0 };
+
+    constexpr static int LEAF_1 = 1;
+    __cpuid(cpuInfo, LEAF_1);
+
+    constexpr static size_t ECX = 2;
+    constexpr static size_t VMX_BIT = 1 << 5;
+    return (cpuInfo[ECX] & VMX_BIT) != 0;
+}
+
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
     UNREFERENCED_PARAMETER(RegistryPath);
 
@@ -13,11 +26,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
 
     DbgPrint("[+] BluePill Hypervisor driver loaded!\n");
 
-    int cpuInfo[4] = { 0 };
-    __cpuid(cpuInfo, 1);
-    bool vmxSupported = (cpuInfo[2] & (1 << 5)) != 0;
-
-    if (vmxSupported) {
+    if (isVmxSupported()) {
         DbgPrint("[+] SUCCESS: Intel VT-x is supported! The Throne is empty.\n");
     }
     else {
