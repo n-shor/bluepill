@@ -27,7 +27,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     DbgPrint("[+] BluePill Hypervisor driver loaded!\n");
 
     if (isVmxSupported()) {
-        DbgPrint("[+] SUCCESS: Intel VT-x is supported! The Throne is empty.\n");
+        DbgPrint("[+] SUCCESS: Intel VT-x is supported!\n");
     }
     else {
         DbgPrint("[-] ERROR: Intel VT-x is NOT supported. Check your VM settings.\n");
