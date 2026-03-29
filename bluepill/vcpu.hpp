@@ -8,6 +8,8 @@ private:
     ULONG m_processorIndex;
     PVOID m_vmxonVirtualAddress;
     unsigned long long m_vmxonPhysicalAddress;
+    PVOID m_vmcsVirtualAddress;
+    unsigned long long m_vmcsPhysicalAddress;
 
     void EnableVmx() {
         const unsigned long long oldCr4 = __readcr4();
@@ -76,15 +78,73 @@ public:
         {
             DbgPrint("[-] ERROR: Failed to execute the __vmx_on() intrinsic.\n");
 
+            DisableVmx();
+
             MmFreeContiguousMemory(m_vmxonVirtualAddress);
             m_vmxonVirtualAddress = nullptr;
             m_vmxonPhysicalAddress = 0;
 
+            return false;
+        }
+
+        maximumAddress.QuadPart = MAXULONG64;
+        m_vmcsVirtualAddress = MmAllocateContiguousMemory(PAGE_SIZE, maximumAddress);
+        if (m_vmcsVirtualAddress == nullptr) {
+            DbgPrint("[-] ERROR: Failed to allocate contiguous memory for VMCS Region.\n");
+
+            __vmx_off();
             DisableVmx();
+
+            MmFreeContiguousMemory(m_vmxonVirtualAddress);
+            m_vmxonVirtualAddress = nullptr;
+            m_vmxonPhysicalAddress = 0;
 
             return false;
         }
 
+        RtlSecureZeroMemory(m_vmcsVirtualAddress, PAGE_SIZE);
+
+        m_vmcsPhysicalAddress = MmGetPhysicalAddress(m_vmcsVirtualAddress).QuadPart;
+
+        *(reinterpret_cast<ULONG*>(m_vmcsVirtualAddress)) = revisionId;
+
+        if (__vmx_vmclear(&m_vmcsPhysicalAddress) != 0)
+        {
+            DbgPrint("[-] ERROR: Failed to execute the __vmx_vmclear() intrinsic.\n");
+
+            __vmx_off();
+            DisableVmx();
+
+            MmFreeContiguousMemory(m_vmxonVirtualAddress);
+            m_vmxonVirtualAddress = nullptr;
+            m_vmxonPhysicalAddress = 0;
+
+            MmFreeContiguousMemory(m_vmcsVirtualAddress);
+            m_vmcsVirtualAddress = nullptr;
+            m_vmcsPhysicalAddress = 0;
+
+            return false;
+        }
+
+        if (__vmx_vmptrld(&m_vmcsPhysicalAddress) != 0)
+        {
+            DbgPrint("[-] ERROR: Failed to execute the __vmx_vmptrld() intrinsic.\n");
+
+            __vmx_off();
+            DisableVmx();
+
+            MmFreeContiguousMemory(m_vmxonVirtualAddress);
+            m_vmxonVirtualAddress = nullptr;
+            m_vmxonPhysicalAddress = 0;
+
+            MmFreeContiguousMemory(m_vmcsVirtualAddress);
+            m_vmcsVirtualAddress = nullptr;
+            m_vmcsPhysicalAddress = 0;
+
+            return false;
+        }
+
+        DbgPrint("[+] VCPU %lu successfully initialized.\n", m_processorIndex);
         return true;
     }
 
@@ -94,9 +154,14 @@ public:
 
         if (m_vmxonVirtualAddress != nullptr) {
             MmFreeContiguousMemory(m_vmxonVirtualAddress);
-
             m_vmxonVirtualAddress = nullptr;
             m_vmxonPhysicalAddress = 0;
+        }
+        if (m_vmcsVirtualAddress != nullptr)
+        {
+            MmFreeContiguousMemory(m_vmcsVirtualAddress);
+            m_vmcsVirtualAddress = nullptr;
+            m_vmcsPhysicalAddress = 0;
         }
 
         DbgPrint("[*] VCPU %lu successfully powered down and memory freed.\n", m_processorIndex);

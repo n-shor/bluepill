@@ -1,7 +1,7 @@
 #pragma once
 #include <ntddk.h>
 #include <intrin.h>
-#include "Vcpu.hpp"
+#include "vcpu.hpp"
 
 // change pool tag later to 'erhT' later to avoid easy detection in memory
 static constexpr ULONG POOL_TAG = 'llip';
