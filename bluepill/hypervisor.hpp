@@ -6,18 +6,21 @@
 // change pool tag later to 'erhT' later to avoid easy detection in memory
 static constexpr ULONG POOL_TAG = 'llip';
 
-class Hypervisor {
+class Hypervisor
+{
 private:
     Vcpu* m_vcpus = nullptr;
     ULONG m_processorCount = 0;
 
-    bool IsVmxSupportedGlobally() {
+    bool IsVmxSupportedGlobally()
+    {
         CPUID cpuInfo = { 0 };
         static constexpr int LEAF_1 = 1;
         __cpuid(reinterpret_cast<int*>(&cpuInfo), LEAF_1);
 
         static constexpr size_t CPUID_VMX_BIT = 1ull << 5;
-        if ((cpuInfo.ecx & CPUID_VMX_BIT) == 0) {
+        if ((cpuInfo.ecx & CPUID_VMX_BIT) == 0)
+        {
             return false;
         }
 
@@ -27,8 +30,10 @@ private:
 public:
     Hypervisor() = default;
 
-    bool Start() {
-        if (!IsVmxSupportedGlobally()) {
+    bool Start()
+    {
+        if (!IsVmxSupportedGlobally())
+        {
             DbgPrint("[-] ERROR: Intel VT-x is NOT supported by the CPU.\n");
             return false;
         }
@@ -51,12 +56,14 @@ public:
 
             // if a core fails, for now we abort the entire driver startup.
             // maybe one day we work on a way to work around this for a more robust rootkit
-            if (!success) {
+            if (!success)
+            {
                 DbgPrint("[-] ERROR: Initialization failed on core %lu. Aborting.\n", i);
 
                 // rollback process to ensure we don't destroy anything:
 
-                for (ULONG j = 0; j < i; ++j) {
+                for (ULONG j = 0; j < i; ++j)
+                {
                     KAFFINITY rollbackAffinity = KeSetSystemAffinityThreadEx(1ull << j);
                     m_vcpus[j].Teardown();
                     KeRevertToUserAffinityThreadEx(rollbackAffinity);
@@ -73,8 +80,10 @@ public:
         return true;
     }
 
-    void Stop() {
-        if (m_vcpus != nullptr) {
+    void Stop()
+    {
+        if (m_vcpus != nullptr)
+        {
             for (ULONG i = 0; i < m_processorCount; ++i)
             {
                 KAFFINITY oldAffinity = KeSetSystemAffinityThreadEx(1ull << i);
