@@ -1,4 +1,5 @@
 #pragma once
+
 #include <ntddk.h>
 #include <intrin.h>
 #include "utils.hpp"
@@ -33,7 +34,7 @@ public:
     ~Vcpu() = default;
 
     // needs to run on the specific core this VCPU object is assigned to
-    bool Initialize(const ULONG processorIndex)
+    bool Initialize(const ULONG processorIndex, const EPT_POINTER eptPointer)
     {
         m_processorIndex = processorIndex;
 
@@ -109,6 +110,19 @@ public:
         if (__vmx_vmptrld(&m_vmcs.value().PhysicalAddress()) != 0)
         {
             DbgPrint("[-] ERROR: Failed to execute the __vmx_vmptrld() intrinsic.\n");
+
+            __vmx_off();
+            DisableVmx();
+
+            return false;
+        }
+
+        // setting up the VMCS
+
+		static constexpr UINT64 VMCS_CTRL_EPT_POINTER = 0x201A;
+        if (__vmx_vmwrite(VMCS_CTRL_EPT_POINTER, eptPointer.All) != 0)
+        {
+            DbgPrint("[-] ERROR: Failed to write EPT pointer to VMCS on core %lu.\n", m_processorIndex);
 
             __vmx_off();
             DisableVmx();

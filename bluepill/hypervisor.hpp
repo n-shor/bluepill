@@ -1,7 +1,9 @@
 #pragma once
+
 #include <ntddk.h>
 #include <intrin.h>
 #include "vcpu.hpp"
+#include "ept.hpp"
 
 // change pool tag later to 'erhT' later to avoid easy detection in memory
 static constexpr ULONG POOL_TAG = 'llip';
@@ -11,6 +13,7 @@ class Hypervisor
 private:
     Vcpu* m_vcpus = nullptr;
     ULONG m_processorCount = 0;
+	VmmEpt m_ept;
 
     bool IsVmxSupportedGlobally()
     {
@@ -27,8 +30,25 @@ private:
         return true;
     }
 
+    bool IsEptSupportedGlobally()
+    {
+        IA32_VMX_EPT_VPID_CAP_MSR eptVpidCap = { 0 };
+        static constexpr size_t MSR_IA32_VMX_EPT_VPID_CAP = 0x48C;
+
+        eptVpidCap.All = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+
+        return eptVpidCap.Fields.SupportPageWalkLength4 &&
+            eptVpidCap.Fields.SupportWriteBackMemoryType &&
+            eptVpidCap.Fields.SupportPde2mbPages;
+	}
+
 public:
     Hypervisor() = default;
+    
+    ~Hypervisor()
+    {
+        Stop();
+    }
 
     bool Start()
     {
@@ -38,6 +58,18 @@ public:
             return false;
         }
         
+        if (!IsEptSupportedGlobally())
+        {
+            DbgPrint("[-] ERROR: EPT is NOT supported by the CPU.\n");
+            return false;
+		}
+
+        if (!m_ept.Initialize())
+        {
+            DbgPrint("[-] ERROR: Failed to initialize EPT.\n");
+            return false;
+        }
+
         m_processorCount = KeQueryActiveProcessorCount(NULL);
 
         size_t vcpuArraySize = sizeof(Vcpu) * m_processorCount;
@@ -51,7 +83,7 @@ public:
         for (ULONG i = 0; i < m_processorCount; ++i)
         {
             KAFFINITY oldAffinity = KeSetSystemAffinityThreadEx(1ull << i);
-            bool success = m_vcpus[i].Initialize(i);
+            bool success = m_vcpus[i].Initialize(i, m_ept.GetEptPointer());
             KeRevertToUserAffinityThreadEx(oldAffinity);
 
             // if a core fails, for now we abort the entire driver startup.
@@ -64,6 +96,8 @@ public:
 
                 for (ULONG j = 0; j < i; ++j)
                 {
+					// only works if we have fewer than 64 cores, which is a safe assumption for now.
+                    // if we had more than 64 cores, we would need to use processor groups (KeSetSystemGroupAffinityThread)
                     KAFFINITY rollbackAffinity = KeSetSystemAffinityThreadEx(1ull << j);
                     m_vcpus[j].Teardown();
                     KeRevertToUserAffinityThreadEx(rollbackAffinity);
@@ -95,6 +129,8 @@ public:
             m_vcpus = nullptr;
         }
 
-        DbgPrint("[*] Hypervisor stopped safely.\n");
+        m_ept.Teardown();
+
+        DbgPrint("[*] Hypervisor successfully stopped and memory freed.\n");
     }
 };

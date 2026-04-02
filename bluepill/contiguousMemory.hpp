@@ -75,7 +75,7 @@ public:
 	static Optional<ContiguousMemory> allocate(const size_t size)
 	{
 		PHYSICAL_ADDRESS maximumAddress;
-		maximumAddress.QuadPart = MAXULONG64;
+		maximumAddress.QuadPart = MAXUINT64;
 		const PVOID virtualAddress = MmAllocateContiguousMemory(size, maximumAddress);
 		if (virtualAddress == nullptr)
 		{

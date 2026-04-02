@@ -157,6 +157,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="contiguousMemory.hpp" />
+    <ClInclude Include="ept.hpp" />
     <ClInclude Include="hypervisor.hpp" />
     <ClInclude Include="structs.h" />
     <ClInclude Include="utils.hpp" />
