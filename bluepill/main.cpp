@@ -1,5 +1,5 @@
-#include <ntddk.h>
 #include "hypervisor.hpp"
+#include <ntddk.h>
 
 inline void* __cdecl operator new(size_t, void* p)
 {

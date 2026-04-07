@@ -1,10 +1,10 @@
 #pragma once
 
-#include <ntddk.h>
-#include <intrin.h>
-#include "utils.hpp"
 #include "contiguousMemory.hpp"
 #include "structs.h"
+#include "utils.hpp"
+#include <intrin.h>
+#include <ntddk.h>
 
 class Vcpu
 {
@@ -56,7 +56,7 @@ public:
         }
 
         EnableVmx();
-        
+
         m_vmxon = ContiguousMemory::allocate(PAGE_SIZE);
         if (!m_vmxon.has())
         {
@@ -119,7 +119,7 @@ public:
 
         // setting up the VMCS
 
-		static constexpr UINT64 VMCS_CTRL_EPT_POINTER = 0x201A;
+        static constexpr UINT64 VMCS_CTRL_EPT_POINTER = 0x201A;
         if (__vmx_vmwrite(VMCS_CTRL_EPT_POINTER, eptPointer.All) != 0)
         {
             DbgPrint("[-] ERROR: Failed to write EPT pointer to VMCS on core %lu.\n", m_processorIndex);

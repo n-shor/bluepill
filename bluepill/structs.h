@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ntddk.h>
+
 typedef struct _CPUID
 {
     int eax;
@@ -82,7 +84,7 @@ typedef union _IA32_VMX_EPT_VPID_CAP_MSR
 typedef union _EPT_POINTER
 {
     UINT64 All;
-    struct 
+    struct
     {
         UINT64 MemoryType : 3;
         UINT64 PageWalkLength : 3;
@@ -153,7 +155,8 @@ typedef union _EPT_PDE
 typedef union _EPT_PTE
 {
     UINT64 All;
-    struct {
+    struct
+    {
         UINT64 ReadAccess : 1;
         UINT64 WriteAccess : 1;
         UINT64 ExecuteAccess : 1;
