@@ -1,4 +1,5 @@
 #include "hypervisor.hpp"
+#include "utils.hpp"
 #include <ntddk.h>
 
 inline void* __cdecl operator new(size_t, void* p)
@@ -8,7 +9,7 @@ inline void* __cdecl operator new(size_t, void* p)
 
 void __cdecl operator delete(void*, unsigned __int64)
 {
-    DbgPrint("[!] PROBLEM: Something is wrong - non existent delete was called.\n");
+    LOG_ERROR("Something is wrong - non existent delete was called.");
 }
 
 Hypervisor* g_Hypervisor = nullptr;
@@ -27,7 +28,7 @@ void DriverUnload(PDRIVER_OBJECT DriverObject)
         g_Hypervisor = nullptr;
     }
 
-    DbgPrint("[*] BluePill Hypervisor driver unloaded.\n");
+    LOG_INFO("BluePill Hypervisor driver unloaded.");
 }
 
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
@@ -35,12 +36,12 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     UNREFERENCED_PARAMETER(RegistryPath);
 
     DriverObject->DriverUnload = DriverUnload;
-    DbgPrint("[+] BluePill Hypervisor driver loading...\n");
+    LOG_INFO("BluePill Hypervisor driver loading...");
 
     PVOID rawMemory = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(Hypervisor), HYPER_TAG);
     if (rawMemory == nullptr)
     {
-        DbgPrint("[-] ERROR: Failed to allocate memory for g_Hypervisor.\n");
+        LOG_ERROR("Failed to allocate memory for g_Hypervisor.");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 

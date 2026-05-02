@@ -9,7 +9,7 @@ private:
     ContiguousMemory(PVOID virtualAddress, unsigned long long physicalAddress)
         : m_virtualAddress(virtualAddress), m_physicalAddress(physicalAddress)
     {
-        // DbgPrint("[.] INFO: ContiguousMemory() called.\n");
+        // LOG_INFO("ContiguousMemory() called.");
     }
 
     PVOID m_virtualAddress;
@@ -18,7 +18,7 @@ private:
 public:
     ~ContiguousMemory() noexcept
     {
-        // DbgPrint("[.] INFO: ~ContiguousMemory(%d) called.\n", m_virtualAddress != nullptr);
+        // LOG_INFO("~ContiguousMemory(%d) called.", m_virtualAddress != nullptr);
 
         if (m_virtualAddress != nullptr)
         {

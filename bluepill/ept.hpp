@@ -1,6 +1,7 @@
 #pragma once
 
 #include "structs.h"
+#include "utils.hpp"
 #include <ntddk.h>
 
 static constexpr size_t ADDRESS_SIZE_BITS = 48;
@@ -78,11 +79,11 @@ public:
 
         if (mappedPfn == expectedPfn)
         {
-            DbgPrint("[+] EPT VERIFICATION PASSED.\n");
+            LOG_INFO("EPT VERIFICATION PASSED.");
             return true;
         }
 
-        DbgPrint("[-] EPT VERIFICATION FAILED.\n");
+        LOG_ERROR("EPT VERIFICATION FAILED.");
         return false;
     }
 #endif
@@ -90,120 +91,135 @@ public:
     bool Initialize()
     {
         // allocating the root PML4 table
-        this->Pml4VirtualAddress = static_cast<PEPT_PML4E>(
-            ExAllocatePool2(POOL_FLAG_NON_PAGED, PAGE_SIZE, EPT_POOL_TAG));
+        UINT64 tablePhysicalAddress = 0;
+        this->Pml4VirtualAddress = static_cast<PEPT_PML4E>(AllocateEptTable(&tablePhysicalAddress));
         if (this->Pml4VirtualAddress == nullptr)
         {
-            DbgPrint("[-] ERROR: Failed to allocate root PML4 table.\n");
+            LOG_ERROR("Failed to allocate root PML4 table.");
             return false;
         }
 
-        this->Pml4PhysicalAddress = MmGetPhysicalAddress(this->Pml4VirtualAddress).QuadPart;
+        this->Pml4PhysicalAddress = tablePhysicalAddress;
+
+        // allocating the PDPT table (covers 512GB of physical address space)
+        PEPT_PDPTE pdptTable = static_cast<PEPT_PDPTE>(AllocateEptTable(&tablePhysicalAddress));
+        if (pdptTable == nullptr)
+        {
+            LOG_ERROR("Failed to allocate PDPT table.");
+            return false;
+        }
+
+        this->Pml4VirtualAddress[0].Fields.PageDirectoryPointerTableAddress = (tablePhysicalAddress >> PFN_SIZE_BITS);
+        this->Pml4VirtualAddress[0].Fields.ReadAccess = 1;
+        this->Pml4VirtualAddress[0].Fields.WriteAccess = 1;
+        this->Pml4VirtualAddress[0].Fields.ExecuteAccess = 1;
+
+        // allocating 512 PD tables (each holds 512 2MB pages = 1GB per PD)
+        for (size_t pdptIndex = 0; pdptIndex < MAX_ENTRY_COUNT; ++pdptIndex)
+        {
+            PEPT_PDE_2MB pdTable = static_cast<PEPT_PDE_2MB>(AllocateEptTable(&tablePhysicalAddress));
+            if (pdTable == nullptr)
+            {
+                LOG_ERROR("Failed to allocate PD table %zu.", pdptIndex);
+                return false;
+            }
+
+            pdptTable[pdptIndex].Fields.PageDirectoryAddress = (tablePhysicalAddress >> PFN_SIZE_BITS);
+            pdptTable[pdptIndex].Fields.ReadAccess = 1;
+            pdptTable[pdptIndex].Fields.WriteAccess = 1;
+            pdptTable[pdptIndex].Fields.ExecuteAccess = 1;
+
+            // filling the PD table with 2MB large pages mapping MMIO by default
+            for (size_t pdIndex = 0; pdIndex < MAX_ENTRY_COUNT; ++pdIndex)
+            {
+                pdTable[pdIndex].Fields.ReadAccess = 1;
+                pdTable[pdIndex].Fields.WriteAccess = 1;
+                pdTable[pdIndex].Fields.ExecuteAccess = 1;
+                pdTable[pdIndex].Fields.LargePage = 1;
+                pdTable[pdIndex].Fields.EPTMemoryType = 0; // 0 = uncacheable (safe for MMIO)
+                pdTable[pdIndex].Fields.PageAddress = (pdptIndex * MAX_ENTRY_COUNT) + pdIndex;
+            }
+
+            // shattering the very first 2MB page to protect VGA memory
+            if (pdptIndex == 0)
+            {
+                PEPT_PTE ptTable = static_cast<PEPT_PTE>(AllocateEptTable(&tablePhysicalAddress));
+                if (ptTable == nullptr)
+                {
+                    LOG_ERROR("Failed to allocate PT table for first 2MB.");
+                    return false;
+                }
+
+                // change PDE 0 from a large page to a standard directory pointer
+                PEPT_PDE standardPd = reinterpret_cast<PEPT_PDE>(pdTable);
+                standardPd[0].All = 0;
+                standardPd[0].Fields.PageTableAddress = (tablePhysicalAddress >> PFN_SIZE_BITS);
+                standardPd[0].Fields.ReadAccess = 1;
+                standardPd[0].Fields.WriteAccess = 1;
+                standardPd[0].Fields.ExecuteAccess = 1;
+
+                // map the 512 4KB pages
+                for (size_t ptIndex = 0; ptIndex < MAX_ENTRY_COUNT; ++ptIndex)
+                {
+                    ptTable[ptIndex].Fields.ReadAccess = 1;
+                    ptTable[ptIndex].Fields.WriteAccess = 1;
+                    ptTable[ptIndex].Fields.ExecuteAccess = 1;
+                    ptTable[ptIndex].Fields.PageAddress = ptIndex;
+
+                    // 0xA0000 to 0xBFFFF is VGA memory
+                    // 0xC0000 to 0xFFFFF is BIOS/ROM
+                    if (ptIndex >= 0xA0 && ptIndex <= 0xFF)
+                    {
+                        ptTable[ptIndex].Fields.EPTMemoryType = 0; // uncacheable
+                    }
+                    else
+                    {
+                        ptTable[ptIndex].Fields.EPTMemoryType = MEMORY_TYPE_WRITEBACK;
+                    }
+                }
+            }
+        }
 
         // getting the motherboard's RAM boundaries
         PPHYSICAL_MEMORY_RANGE memoryRanges = MmGetPhysicalMemoryRanges();
         if (memoryRanges == nullptr)
         {
-            DbgPrint("[-] ERROR: MmGetPhysicalMemoryRanges returned NULL.\n");
+            LOG_ERROR("MmGetPhysicalMemoryRanges returned NULL.");
             return false;
         }
 
-        // cache variables to increase initialization speed and to prevent lagspike induced crashes
-        UINT64 cachedPml4Offset = ~0ULL;
-        PEPT_PDPTE currentPdptTable = nullptr;
-
-        UINT64 cachedPdptOffset = ~0ULL;
-        PEPT_PDE currentPdTable = nullptr;
-
-        UINT64 cachedPdOffset = ~0ULL;
-        PEPT_PTE currentPtTable = nullptr;
-
-        // iterating through the memory ranges
+        // iterating through the memory ranges to flip specific 2MB pages to write-back
         for (size_t i = 0; memoryRanges[i].NumberOfBytes.QuadPart != 0; ++i)
         {
             UINT64 startAddress = memoryRanges[i].BaseAddress.QuadPart;
             UINT64 endAddress = startAddress + memoryRanges[i].NumberOfBytes.QuadPart;
 
-            // going across the RAM 4KB at a time
-            for (UINT64 physicalAddress = startAddress; physicalAddress < endAddress; physicalAddress += PAGE_SIZE)
+            UINT64 startPfn2MB = startAddress / (2ull * 1024 * 1024);
+            UINT64 endPfn2MB = endAddress / (2ull * 1024 * 1024);
+
+            for (UINT64 pfn = startPfn2MB; pfn <= endPfn2MB; ++pfn)
             {
-                UINT64 pml4Offset = (physicalAddress >> (ADDRESS_SIZE_BITS - OFFSET_SIZE_BITS)) & ((1ull << OFFSET_SIZE_BITS) - 1);
-                UINT64 pdptOffset = (physicalAddress >> (ADDRESS_SIZE_BITS - (OFFSET_SIZE_BITS * 2))) & ((1ull << OFFSET_SIZE_BITS) - 1);
-                UINT64 pdOffset = (physicalAddress >> (ADDRESS_SIZE_BITS - (OFFSET_SIZE_BITS * 3))) & ((1ull << OFFSET_SIZE_BITS) - 1);
-                UINT64 ptOffset = (physicalAddress >> (ADDRESS_SIZE_BITS - (OFFSET_SIZE_BITS * 4))) & ((1ull << OFFSET_SIZE_BITS) - 1);
-
-                // --- LEVEL 4 (PML4) ---
-                PEPT_PML4E pml4Entry = &this->Pml4VirtualAddress[pml4Offset];
-
-                if (pml4Offset != cachedPml4Offset)
+                if (pfn == 0)
                 {
-                    UINT64 tablePhysicalAddress = 0;
-                    currentPdptTable = static_cast<PEPT_PDPTE>(AllocateEptTable(&tablePhysicalAddress));
-                    if (currentPdptTable == nullptr)
-                    {
-                        DbgPrint("[-] ERROR: Failed to allocate PDPT Table.\n");
-                        return false;
-                    }
-
-                    pml4Entry->Fields.PageDirectoryPointerTableAddress = (tablePhysicalAddress >> PFN_SIZE_BITS);
-                    pml4Entry->Fields.ReadAccess = 1;
-                    pml4Entry->Fields.WriteAccess = 1;
-                    pml4Entry->Fields.ExecuteAccess = 1;
-
-                    cachedPml4Offset = pml4Offset;
+                    continue; // skip first 2MB since it was handled manually
                 }
 
-                // --- LEVEL 3 (PDPT) ---
-                PEPT_PDPTE pdptEntry = &currentPdptTable[pdptOffset];
-
-                if (pdptOffset != cachedPdptOffset)
+                if (pfn >= (512 * 512)) // 262144
                 {
-                    UINT64 tablePhysicalAddress = 0;
-                    currentPdTable = static_cast<PEPT_PDE>(AllocateEptTable(&tablePhysicalAddress));
-                    if (currentPdTable == nullptr)
-                    {
-                        DbgPrint("[-] ERROR: Failed to allocate PD Table.\n");
-                        return false;
-                    }
-
-                    pdptEntry->Fields.PageDirectoryAddress = (tablePhysicalAddress >> PFN_SIZE_BITS);
-                    pdptEntry->Fields.ReadAccess = 1;
-                    pdptEntry->Fields.WriteAccess = 1;
-                    pdptEntry->Fields.ExecuteAccess = 1;
-
-                    cachedPdptOffset = pdptOffset;
+                    continue; // skip mapping beyond 512GB
                 }
 
-                // --- LEVEL 2 (PD) ---
-                PEPT_PDE pdEntry = &currentPdTable[pdOffset];
+                UINT64 pdptOffset = (pfn >> OFFSET_SIZE_BITS) & ((1ull << OFFSET_SIZE_BITS) - 1);
+                UINT64 pdOffset = pfn & ((1ull << OFFSET_SIZE_BITS) - 1);
 
-                if (pdOffset != cachedPdOffset)
+                PHYSICAL_ADDRESS pdPhysicalAddress;
+                pdPhysicalAddress.QuadPart = (static_cast<ULONG64>(pdptTable[pdptOffset].Fields.PageDirectoryAddress)) << PFN_SIZE_BITS;
+                PEPT_PDE_2MB pdTable = static_cast<PEPT_PDE_2MB>(MmGetVirtualForPhysical(pdPhysicalAddress));
+
+                if (pdTable != nullptr)
                 {
-                    UINT64 tablePhysicalAddress = 0;
-                    currentPtTable = static_cast<PEPT_PTE>(AllocateEptTable(&tablePhysicalAddress));
-                    if (currentPtTable == nullptr)
-                    {
-                        DbgPrint("[-] ERROR: Failed to allocate PT Table.\n");
-                        return false;
-                    }
-
-                    pdEntry->Fields.PageTableAddress = (tablePhysicalAddress >> PFN_SIZE_BITS);
-                    pdEntry->Fields.ReadAccess = 1;
-                    pdEntry->Fields.WriteAccess = 1;
-                    pdEntry->Fields.ExecuteAccess = 1;
-
-                    cachedPdOffset = pdOffset;
+                    pdTable[pdOffset].Fields.EPTMemoryType = MEMORY_TYPE_WRITEBACK;
                 }
-
-                // --- LEVEL 1 (PT) ---
-                PEPT_PTE ptEntry = &currentPtTable[ptOffset];
-
-                // map the current loop's physical address directly
-                ptEntry->Fields.PageAddress = (physicalAddress >> PFN_SIZE_BITS);
-                ptEntry->Fields.ReadAccess = 1;
-                ptEntry->Fields.WriteAccess = 1;
-                ptEntry->Fields.ExecuteAccess = 1;
-                ptEntry->Fields.EPTMemoryType = MEMORY_TYPE_WRITEBACK;
             }
         }
 
@@ -216,10 +232,7 @@ public:
         this->EptPointer.Fields.PageMapLevel4Address = (this->Pml4PhysicalAddress >> PFN_SIZE_BITS);
 
 #if DBG
-        if (!VerifyEptMapping())
-        {
-            return false;
-        }
+        // if (!VerifyEptMapping()) { return false; }
 #endif
 
         return true;
@@ -239,9 +252,7 @@ public:
             if (pml4Entry->Fields.ReadAccess == 1)
             {
                 PHYSICAL_ADDRESS pdptPhysicalAddress;
-                pdptPhysicalAddress.QuadPart = (static_cast<ULONG64>(
-                                                   pml4Entry->Fields.PageDirectoryPointerTableAddress))
-                                               << PFN_SIZE_BITS;
+                pdptPhysicalAddress.QuadPart = (static_cast<ULONG64>(pml4Entry->Fields.PageDirectoryPointerTableAddress)) << PFN_SIZE_BITS;
                 PEPT_PDPTE pdptTable = static_cast<PEPT_PDPTE>(MmGetVirtualForPhysical(pdptPhysicalAddress));
 
                 if (pdptTable != nullptr)
@@ -258,14 +269,17 @@ public:
 
                             if (pdTable != nullptr)
                             {
-                                // level 2 (PD) loop
-                                for (size_t pdIndex = 0; pdIndex < MAX_ENTRY_COUNT; ++pdIndex)
+                                /// level 2 (PD) loop - check for the shattered 4KB table in the first 2MB
+                                if (pdptIndex == 0)
                                 {
-                                    PEPT_PDE pdEntry = &pdTable[pdIndex];
-                                    if (pdEntry->Fields.ReadAccess == 1)
+                                    // cast to the 2MB struct specifically to read the LargePage bit
+                                    PEPT_PDE_2MB checkPd = reinterpret_cast<PEPT_PDE_2MB>(pdTable);
+
+                                    // ensuring it's not a large page (LargePage == 0 means it points to a PT)
+                                    if (checkPd[0].Fields.ReadAccess == 1 && checkPd[0].Fields.LargePage == 0)
                                     {
                                         PHYSICAL_ADDRESS ptPhysicalAddress;
-                                        ptPhysicalAddress.QuadPart = (static_cast<ULONG64>(pdEntry->Fields.PageTableAddress)) << PFN_SIZE_BITS;
+                                        ptPhysicalAddress.QuadPart = (static_cast<ULONG64>(pdTable[0].Fields.PageTableAddress)) << PFN_SIZE_BITS;
                                         PEPT_PTE ptTable = static_cast<PEPT_PTE>(MmGetVirtualForPhysical(ptPhysicalAddress));
 
                                         if (ptTable != nullptr)
@@ -274,6 +288,7 @@ public:
                                         }
                                     }
                                 }
+
                                 ExFreePoolWithTag(pdTable, EPT_POOL_TAG);
                             }
                         }

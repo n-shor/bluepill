@@ -173,3 +173,101 @@ typedef union _EPT_PTE
         UINT64 SuppressVE : 1;
     } Fields;
 } EPT_PTE, *PEPT_PTE;
+
+// we want there to be no alignment padding to ensure all the fields
+// get populated correctly when using intrinsics
+#pragma pack(push, 1)
+
+struct SYSTEM_DESCRIPTOR_TABLE_REGISTER
+{
+    USHORT Limit;
+    ULONG64 Base;
+};
+
+union SEGMENT_SELECTOR
+{
+    USHORT All;
+    struct
+    {
+        USHORT RPL : 2;    // requested privilege level
+        USHORT TI : 1;     // table indicator
+        USHORT Index : 13; // index into the array
+    } Fields;
+};
+
+union SEGMENT_DESCRIPTOR
+{
+    ULONG64 All;
+    struct
+    {
+        ULONG64 LimitLow : 16;
+        ULONG64 BaseLow : 16;
+        ULONG64 BaseMiddle : 8;
+        ULONG64 Type : 4;
+        ULONG64 System : 1;
+        ULONG64 DPL : 2;
+        ULONG64 Present : 1;
+        ULONG64 LimitHigh : 4;
+        ULONG64 AVL : 1;
+        ULONG64 LongMode : 1;
+        ULONG64 DefaultBig : 1;
+        ULONG64 Granularity : 1;
+        ULONG64 BaseHigh : 8;
+    } Fields;
+};
+
+#pragma pack(pop)
+
+struct SEGMENT_INFO
+{
+    ULONG64 Base;
+    ULONG32 Limit;
+    ULONG32 AccessRights;
+};
+
+struct GUEST_REGISTERS
+{
+    ULONG64 Rax;
+    ULONG64 Rcx;
+    ULONG64 Rdx;
+    ULONG64 Rbx;
+    ULONG64 Rbp;
+    ULONG64 Rsi;
+    ULONG64 Rdi;
+    ULONG64 R8;
+    ULONG64 R9;
+    ULONG64 R10;
+    ULONG64 R11;
+    ULONG64 R12;
+    ULONG64 R13;
+    ULONG64 R14;
+    ULONG64 R15;
+};
+
+typedef union _EPT_PDE_2MB
+{
+    UINT64 All;
+    struct
+    {
+        UINT64 ReadAccess : 1;
+        UINT64 WriteAccess : 1;
+        UINT64 ExecuteAccess : 1;
+        UINT64 EPTMemoryType : 3;
+        UINT64 IgnorePAT : 1;
+        UINT64 LargePage : 1; // must be 1
+        UINT64 Accessed : 1;
+        UINT64 Dirty : 1;
+        UINT64 ExecuteAccessForUserModeLinearAddress : 1;
+        UINT64 Ignored1 : 1;
+        UINT64 Reserved1 : 9;
+        UINT64 PageAddress : 31;
+        UINT64 Ignored2 : 11;
+        UINT64 SuppressVE : 1;
+    } Fields;
+} EPT_PDE_2MB, *PEPT_PDE_2MB;
+
+struct INVEPT_DESCRIPTOR
+{
+    UINT64 EptPointer;
+    UINT64 Reserved;
+};

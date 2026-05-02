@@ -1,5 +1,15 @@
 #pragma once
 
+#if DBG
+// in Debug mode, we print to the kernel debugger
+#define LOG_ERROR(fmt, ...) DbgPrint("[-] ERROR: " fmt "\n", ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...) DbgPrint("[+] " fmt "\n", ##__VA_ARGS__)
+#else
+// in Release mode, we strip the prints completely out of the compiled binary
+#define LOG_ERROR(fmt, ...)
+#define LOG_INFO(fmt, ...)
+#endif
+
 void __cdecl operator delete(void*, unsigned __int64);
 
 template <class T>
@@ -92,9 +102,13 @@ public:
         return m_has;
     }
 
-    // TODO: handle access with has=false
     T& value() noexcept
     {
+        if (!m_has)
+        {
+            LOG_ERROR("Illegal Optional access.");
+        }
+
         return m_value;
     }
 
@@ -112,3 +126,19 @@ public:
         m_has = false;
     }
 };
+
+extern "C"
+{
+    USHORT AsmGetCs();
+    USHORT AsmGetDs();
+    USHORT AsmGetEs();
+    USHORT AsmGetSs();
+    USHORT AsmGetFs();
+    USHORT AsmGetGs();
+    USHORT AsmGetTr();
+    USHORT AsmGetLdtr();
+    void AsmGetGdtr(void* Gdtr);
+    void AsmGetIdtr(void* Idtr);
+
+    void AsmInveptAllContexts(INVEPT_DESCRIPTOR* descriptor);
+}

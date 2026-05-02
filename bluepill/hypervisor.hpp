@@ -21,8 +21,7 @@ private:
         static constexpr int LEAF_1 = 1;
         __cpuid(reinterpret_cast<int*>(&cpuInfo), LEAF_1);
 
-        static constexpr size_t CPUID_VMX_BIT = 1ull << 5;
-        if ((cpuInfo.ecx & CPUID_VMX_BIT) == 0)
+        if ((cpuInfo.ecx & CPUID_FEATURES::VMX) == 0)
         {
             return false;
         }
@@ -33,9 +32,8 @@ private:
     bool IsEptSupportedGlobally()
     {
         IA32_VMX_EPT_VPID_CAP_MSR eptVpidCap = { 0 };
-        static constexpr size_t MSR_IA32_VMX_EPT_VPID_CAP = 0x48C;
 
-        eptVpidCap.All = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+        eptVpidCap.All = __readmsr(static_cast<ULONG>(VMX_MSR::IA32_EPT_VPID_CAP));
 
         return eptVpidCap.Fields.SupportPageWalkLength4 &&
                eptVpidCap.Fields.SupportWriteBackMemoryType &&
@@ -54,19 +52,19 @@ public:
     {
         if (!IsVmxSupportedGlobally())
         {
-            DbgPrint("[-] ERROR: Intel VT-x is NOT supported by the CPU.\n");
+            LOG_ERROR("Intel VT-x is NOT supported by the CPU.");
             return false;
         }
 
         if (!IsEptSupportedGlobally())
         {
-            DbgPrint("[-] ERROR: EPT is NOT supported by the CPU.\n");
+            LOG_ERROR("EPT is NOT supported by the CPU.");
             return false;
         }
 
         if (!m_ept.Initialize())
         {
-            DbgPrint("[-] ERROR: Failed to initialize EPT.\n");
+            LOG_ERROR("Failed to initialize EPT.");
             return false;
         }
 
@@ -76,7 +74,7 @@ public:
         m_vcpus = static_cast<Vcpu*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, vcpuArraySize, POOL_TAG));
         if (m_vcpus == nullptr)
         {
-            DbgPrint("[-] ERROR: Failed to allocate virtual CPU array.\n");
+            LOG_ERROR("Failed to allocate virtual CPU array.");
             return false;
         }
 
@@ -90,11 +88,11 @@ public:
             // maybe one day we work on a way to work around this for a more robust rootkit
             if (!success)
             {
-                DbgPrint("[-] ERROR: Initialization failed on core %lu. Aborting.\n", i);
+                LOG_ERROR("Initialization failed on core %lu. Aborting.", i);
 
                 // rollback process to ensure we don't destroy anything:
 
-                for (ULONG j = 0; j < i; ++j)
+                for (ULONG j = 0; j <= i; ++j)
                 {
                     // only works if we have fewer than 64 cores, which is a safe assumption for now.
                     // if we had more than 64 cores, we would need to use processor groups (KeSetSystemGroupAffinityThread)
@@ -110,7 +108,7 @@ public:
             }
         }
 
-        DbgPrint("[+] SUCCESS: Hypervisor started on all cores!\n");
+        LOG_INFO("SUCCESS: Hypervisor started on all cores!");
         return true;
     }
 
@@ -131,6 +129,6 @@ public:
 
         m_ept.Teardown();
 
-        DbgPrint("[*] Hypervisor successfully stopped and memory freed.\n");
+        LOG_INFO("Hypervisor successfully stopped and memory freed.");
     }
 };
