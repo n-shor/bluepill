@@ -156,6 +156,33 @@ inline constexpr size_t INVALID_POINTER = ~0ull;
 inline constexpr size_t GDT_ENTRY_SIZE = 8;
 } // namespace PHYSICAL_MEMORY
 
+namespace MEMORY_TYPES
+{
+inline constexpr size_t UNCACHEABLE = 0;
+inline constexpr size_t WRITEBACK = 6;
+} // namespace MEMORY_TYPES
+
+namespace EPT_CONFIG
+{
+inline constexpr size_t PAGE_WALK_LENGTH_4 = 3;
+inline constexpr size_t MAX_ENTRY_COUNT = 512;
+inline constexpr UINT64 SIZE_2MB = 2ull * 1024 * 1024;
+// remember to change the pool tag to something less obvious later on
+inline constexpr ULONG POOL_TAG = 'TPEV';
+inline constexpr size_t VGA_MEMORY_START_PFN = 0xA0;
+inline constexpr size_t BIOS_MEMORY_END_PFN = 0xFF;
+} // namespace EPT_CONFIG
+
+namespace EPT_SHIFTS
+{
+inline constexpr size_t PML4 = 39;
+inline constexpr size_t PDPT = 30;
+inline constexpr size_t PD = 21;
+inline constexpr size_t PT = 12;
+inline constexpr UINT64 INDEX_MASK = 0x1FF; // 9 bits for 512 indices
+inline constexpr size_t BITS_PER_LEVEL = 9;
+} // namespace EPT_SHIFTS
+
 namespace SEGMENT_ACCESS_RIGHTS
 {
 inline constexpr ULONG UNUSABLE = (1 << 16);

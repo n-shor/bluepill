@@ -87,47 +87,47 @@ AsmVmExitHandler PROC
     push rcx
     push rax
 
-    mov rcx, rsp 
+    mov rcx, rsp
 
-    sub rsp, 256
-    movups [rsp + 0F0h], xmm15
-    movups [rsp + 0E0h], xmm14
-    movups [rsp + 0D0h], xmm13
-    movups [rsp + 0C0h], xmm12
-    movups [rsp + 0B0h], xmm11
-    movups [rsp + 0A0h], xmm10
-    movups [rsp + 090h], xmm9
-    movups [rsp + 080h], xmm8
-    movups [rsp + 070h], xmm7
-    movups [rsp + 060h], xmm6
-    movups [rsp + 050h], xmm5
-    movups [rsp + 040h], xmm4
-    movups [rsp + 030h], xmm3
-    movups [rsp + 020h], xmm2
-    movups [rsp + 010h], xmm1
-    movups [rsp + 000h], xmm0
+    sub rsp, 512
+    vmovups [rsp + 1E0h], ymm15
+    vmovups [rsp + 1C0h], ymm14
+    vmovups [rsp + 1A0h], ymm13
+    vmovups [rsp + 180h], ymm12
+    vmovups [rsp + 160h], ymm11
+    vmovups [rsp + 140h], ymm10
+    vmovups [rsp + 120h], ymm9
+    vmovups [rsp + 100h], ymm8
+    vmovups [rsp + 0E0h], ymm7
+    vmovups [rsp + 0C0h], ymm6
+    vmovups [rsp + 0A0h], ymm5
+    vmovups [rsp + 080h], ymm4
+    vmovups [rsp + 060h], ymm3
+    vmovups [rsp + 040h], ymm2
+    vmovups [rsp + 020h], ymm1
+    vmovups [rsp + 000h], ymm0
 
     sub rsp, 28h
     call CppVmExitDispatcher
     add rsp, 28h
 
-    movups xmm0, [rsp + 000h]
-    movups xmm1, [rsp + 010h]
-    movups xmm2, [rsp + 020h]
-    movups xmm3, [rsp + 030h]
-    movups xmm4, [rsp + 040h]
-    movups xmm5, [rsp + 050h]
-    movups xmm6, [rsp + 060h]
-    movups xmm7, [rsp + 070h]
-    movups xmm8, [rsp + 080h]
-    movups xmm9, [rsp + 090h]
-    movups xmm10, [rsp + 0A0h]
-    movups xmm11, [rsp + 0B0h]
-    movups xmm12, [rsp + 0C0h]
-    movups xmm13, [rsp + 0D0h]
-    movups xmm14, [rsp + 0E0h]
-    movups xmm15, [rsp + 0F0h]
-    add rsp, 256
+    vmovups ymm0,  [rsp + 000h]
+    vmovups ymm1,  [rsp + 020h]
+    vmovups ymm2,  [rsp + 040h]
+    vmovups ymm3,  [rsp + 060h]
+    vmovups ymm4,  [rsp + 080h]
+    vmovups ymm5,  [rsp + 0A0h]
+    vmovups ymm6,  [rsp + 0C0h]
+    vmovups ymm7,  [rsp + 0E0h]
+    vmovups ymm8,  [rsp + 100h]
+    vmovups ymm9,  [rsp + 120h]
+    vmovups ymm10, [rsp + 140h]
+    vmovups ymm11, [rsp + 160h]
+    vmovups ymm12, [rsp + 180h]
+    vmovups ymm13, [rsp + 1A0h]
+    vmovups ymm14, [rsp + 1C0h]
+    vmovups ymm15, [rsp + 1E0h]
+    add rsp, 512
 
     pop rax
     pop rcx
