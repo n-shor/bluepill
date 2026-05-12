@@ -1,7 +1,7 @@
 #pragma once
 #include <ntddk.h>
 
-enum class VMCS_FIELDS : size_t
+enum class VMCS_FIELDS : UINT64
 {
     VIRTUAL_PROCESSOR_ID = 0x00000000,
 
@@ -61,6 +61,13 @@ enum class VMCS_FIELDS : size_t
 
     HOST_IA32_SYSENTER_CS = 0x00004C00,
 
+    CR0_GUEST_HOST_MASK = 0x00006000,
+    CR4_GUEST_HOST_MASK = 0x00006002,
+    CR0_READ_SHADOW = 0x00006004,
+    CR4_READ_SHADOW = 0x00006006,
+
+    VM_EXIT_QUALIFICATION = 0x00006400,
+
     GUEST_CR0 = 0x00006800,
     GUEST_CR3 = 0x00006802,
     GUEST_CR4 = 0x00006804,
@@ -95,7 +102,7 @@ enum class VMCS_FIELDS : size_t
     HOST_RIP = 0x00006C16,
 };
 
-enum class SYSTEM_MSR : size_t
+enum class SYSTEM_MSR : UINT64
 {
     IA32_FEATURE_CONTROL = 0x0000003A,
     IA32_FS_BASE = 0xC0000100,
@@ -105,7 +112,7 @@ enum class SYSTEM_MSR : size_t
     IA32_SYSENTER_EIP = 0x00000176,
 };
 
-enum class VMX_MSR : size_t
+enum class VMX_MSR : UINT64
 {
     IA32_BASIC = 0x00000480,
     IA32_PROCBASED_CTLS2 = 0x0000048B,
@@ -116,15 +123,40 @@ enum class VMX_MSR : size_t
     IA32_TRUE_ENTRY_CTLS = 0x00000490,
 };
 
+namespace HYPERVISOR_CONFIG
+{
+inline constexpr UINT64 STACK_SIZE = 0x8000;
+inline constexpr UINT64 SHUTDOWN_HYPERCALL = 0xDEADDEADDEADull;
+// change later as usual
+inline constexpr ULONG STACK_TAG = 'kStS';
+inline constexpr ULONG VCPU_ARRAY_TAG = 'llip';
+} // namespace HYPERVISOR_CONFIG
+
 namespace CR4_FLAGS
 {
-inline constexpr size_t VMXE = 1ull << 13;
+inline constexpr UINT64 VMXE = 1ull << 13;
 } // namespace CR4_FLAGS
 
 namespace CPUID_FEATURES
 {
-inline constexpr size_t VMX = 1ull << 5;
+// Explicitly define these as MASKS, not indices
+inline constexpr UINT64 VMX = 1ull << 5;
+inline constexpr UINT64 HYPERVISOR_PRESENT = 1ull << 31;
 } // namespace CPUID_FEATURES
+
+namespace CPUID_REGISTER
+{
+inline constexpr UINT64 COUNT = 4;
+inline constexpr UINT64 EAX = 0;
+inline constexpr UINT64 EBX = 1;
+inline constexpr UINT64 ECX = 2;
+inline constexpr UINT64 EDX = 3;
+} // namespace CPUID_REGISTER
+
+namespace CPUID_LEAF
+{
+inline constexpr UINT64 VERSION_AND_FEATURES = 1;
+}
 
 namespace PRIMARY_CONTROLS
 {
@@ -137,7 +169,10 @@ inline constexpr ULONG32 ACTIVATE_SECONDARY_CONTROLS = 1ul << 31;
 namespace SECONDARY_CONTROLS
 {
 inline constexpr ULONG32 ENABLE_EPT = 1ul << 1;
+inline constexpr ULONG32 ENABLE_RDTSCP = 1ul << 3;
 inline constexpr ULONG32 ENABLE_VPID = 1ul << 5;
+inline constexpr ULONG32 ENABLE_INVPCID = 1ul << 12;
+inline constexpr ULONG32 ENABLE_XSAVES = 1ul << 20;
 } // namespace SECONDARY_CONTROLS
 
 namespace EXIT_CONTROLS
@@ -152,35 +187,35 @@ inline constexpr ULONG32 IA32E_MODE_GUEST = 1ul << 9;
 
 namespace PHYSICAL_MEMORY
 {
-inline constexpr size_t INVALID_POINTER = ~0ull;
-inline constexpr size_t GDT_ENTRY_SIZE = 8;
+inline constexpr UINT64 INVALID_POINTER = ~0ull;
+inline constexpr UINT64 GDT_ENTRY_SIZE = 8;
 } // namespace PHYSICAL_MEMORY
 
 namespace MEMORY_TYPES
 {
-inline constexpr size_t UNCACHEABLE = 0;
-inline constexpr size_t WRITEBACK = 6;
+inline constexpr UINT64 UNCACHEABLE = 0;
+inline constexpr UINT64 WRITEBACK = 6;
 } // namespace MEMORY_TYPES
 
 namespace EPT_CONFIG
 {
-inline constexpr size_t PAGE_WALK_LENGTH_4 = 3;
-inline constexpr size_t MAX_ENTRY_COUNT = 512;
+inline constexpr UINT64 PAGE_WALK_LENGTH_4 = 3;
+inline constexpr UINT64 MAX_ENTRY_COUNT = 512;
 inline constexpr UINT64 SIZE_2MB = 2ull * 1024 * 1024;
 // remember to change the pool tag to something less obvious later on
 inline constexpr ULONG POOL_TAG = 'TPEV';
-inline constexpr size_t VGA_MEMORY_START_PFN = 0xA0;
-inline constexpr size_t BIOS_MEMORY_END_PFN = 0xFF;
+inline constexpr UINT64 VGA_MEMORY_START_PFN = 0xA0;
+inline constexpr UINT64 BIOS_MEMORY_END_PFN = 0xFF;
 } // namespace EPT_CONFIG
 
 namespace EPT_SHIFTS
 {
-inline constexpr size_t PML4 = 39;
-inline constexpr size_t PDPT = 30;
-inline constexpr size_t PD = 21;
-inline constexpr size_t PT = 12;
+inline constexpr UINT64 BITS_PER_LEVEL = 9;
+inline constexpr UINT64 PT = 12;
+inline constexpr UINT64 PD = PT + BITS_PER_LEVEL;
+inline constexpr UINT64 PDPT = PD + BITS_PER_LEVEL;
+inline constexpr UINT64 PML4 = PDPT + BITS_PER_LEVEL;
 inline constexpr UINT64 INDEX_MASK = 0x1FF; // 9 bits for 512 indices
-inline constexpr size_t BITS_PER_LEVEL = 9;
 } // namespace EPT_SHIFTS
 
 namespace SEGMENT_ACCESS_RIGHTS
@@ -206,7 +241,13 @@ inline constexpr ULONG AR_GRANULARITY = 15;
 inline constexpr ULONG AR_UNUSABLE = 16;
 } // namespace SEGMENT_SHIFTS
 
-enum class VMEXIT_REASON : size_t
+namespace BITS_32
+{
+inline constexpr UINT64 LOW_MASK = 0xFFFFFFFFull; // masking out the high 32 bits
+inline constexpr UINT64 HIGH_SHIFT = 32;          // shifting to / from the high half of a 64-bit value
+} // namespace BITS_32
+
+enum class VMEXIT_REASON : UINT64
 {
     NMI_EXCEPTION = 0,
     EXTERNAL_INTERRUPT = 1,
@@ -240,8 +281,13 @@ enum class VMEXIT_REASON : size_t
     INVEPT = 50,
     RDTSCP = 51,
     INVVPID = 53,
-    XSETBV = 55
+    XSETBV = 55,
 };
 
-inline constexpr size_t VMX_BASIC_EXIT_REASON_MASK = 0xFFFF;
-inline constexpr size_t VMX_ENTRY_FAILURE_FLAG = 0x80000000;
+namespace GDT_CONSTANTS
+{
+inline constexpr UINT64 SYSTEM_SEGMENT_FLAG = 0;
+} // namespace GDT_CONSTANTS
+
+inline constexpr UINT64 VMX_BASIC_EXIT_REASON_MASK = 0xFFFF;
+inline constexpr UINT64 VMX_ENTRY_FAILURE_FLAG = 0x80000000;

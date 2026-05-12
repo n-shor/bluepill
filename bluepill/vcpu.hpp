@@ -1,15 +1,15 @@
 #pragma once
 
-#include "constants.h"
+#include "constants.hpp"
 #include "contiguousMemory.hpp"
-#include "structs.h"
+#include "structs.hpp"
 #include "utils.hpp"
 #include "vmexitHandler.hpp"
 #include <intrin.h>
 #include <ntddk.h>
 
 #define VMCS_WRITE_SAFE(Field, Value)                                                              \
-    if (__vmx_vmwrite(static_cast<size_t>(Field), static_cast<size_t>(Value)) != 0)                \
+    if (__vmx_vmwrite(static_cast<UINT64>(Field), static_cast<UINT64>(Value)) != 0)                \
     {                                                                                              \
         LOG_ERROR("Failed to write %s to the VMCS region on core %lu.", #Field, m_processorIndex); \
         return false;                                                                              \
@@ -20,10 +20,6 @@ class Vcpu;
 extern "C" bool AsmVirtualize(Vcpu* Context);
 extern "C" bool AsmVmExitHandler(Vcpu* Context);
 
-static constexpr SIZE_T HYPERVISOR_STACK_SIZE = 0x8000;
-// change later as usual
-static constexpr ULONG HYPERVISOR_STACK_TAG = 'kStS';
-
 class Vcpu
 {
 private:
@@ -32,7 +28,6 @@ private:
     Optional<ContiguousMemory> m_vmxon;
     Optional<ContiguousMemory> m_vmcs;
     Optional<ContiguousMemory> m_msrBitmap;
-    Optional<ContiguousMemory> m_virtualApicPage;
     PVOID m_hypervisorStack = nullptr;
 
     void EnableVmx()
@@ -133,15 +128,8 @@ public:
             return false;
         }
 
-        m_virtualApicPage = ContiguousMemory::allocate(PAGE_SIZE);
-        if (!m_virtualApicPage.has())
-        {
-            LOG_ERROR("Failed to allocate virtual APIC page.");
-
-            return false;
-        }
-
-        m_hypervisorStack = ExAllocatePool2(POOL_FLAG_NON_PAGED, HYPERVISOR_STACK_SIZE, HYPERVISOR_STACK_TAG);
+        m_hypervisorStack = ExAllocatePool2(
+            POOL_FLAG_NON_PAGED, HYPERVISOR_CONFIG::STACK_SIZE, HYPERVISOR_CONFIG::STACK_TAG);
         if (!m_hypervisorStack)
         {
             LOG_ERROR("Failed to allocate host stack.");
@@ -164,16 +152,15 @@ public:
 
     void Teardown()
     {
-        __vmx_off();
+        AsmVmcall(HYPERVISOR_CONFIG::SHUTDOWN_HYPERCALL, 0, 0, 0);
 
         m_vmxon.clear();
         m_vmcs.clear();
         m_msrBitmap.clear();
-        m_virtualApicPage.clear();
 
         if (m_hypervisorStack != nullptr)
         {
-            ExFreePoolWithTag(m_hypervisorStack, HYPERVISOR_STACK_TAG);
+            ExFreePoolWithTag(m_hypervisorStack, HYPERVISOR_CONFIG::STACK_TAG);
             m_hypervisorStack = nullptr;
         }
 
@@ -182,21 +169,14 @@ public:
         LOG_INFO("VCPU %lu successfully powered down and memory freed.", m_processorIndex);
     }
 
-    // maybe move these into a separate namespace
     static bool AdjustControlValue(ULONG requestedValue, ULONG64 msrValue, ULONG* outAdjustedValue)
     {
         LARGE_INTEGER msr;
         msr.QuadPart = msrValue;
 
-        // checking if the hardware rejected a feature we explicitly requested
-        if ((requestedValue & msr.HighPart) != requestedValue)
-        {
-            return false;
-        }
-
-        ULONG finalValue = requestedValue;
-        finalValue &= msr.HighPart; // enforces bits that must be 0
-        finalValue |= msr.LowPart;  // enforces bits that must be 1
+        // masking requested bits down to what the hardware allows
+        ULONG finalValue = requestedValue & msr.HighPart;
+        finalValue |= msr.LowPart; // forcing required-1 bits
 
         *outAdjustedValue = finalValue;
         return true;
@@ -220,13 +200,12 @@ public:
                            (segmentDescriptor->Fields.BaseHigh << SEGMENT_SHIFTS::BASE_HIGH);
 
         // system segments in 64 bit are 16 bytes long
-        if (segmentDescriptor->Fields.System == 0)
+        if (segmentDescriptor->Fields.System == GDT_CONSTANTS::SYSTEM_SEGMENT_FLAG)
         {
-            // reading the upper 32 bits which are stored in the next 8 bytes of the GDT
-            ULONG64 upperBase = *(reinterpret_cast<ULONG32*>(
-                reinterpret_cast<ULONG64>(segmentDescriptor) + 8));
+            SYSTEM_SEGMENT_DESCRIPTOR_64* sysDescriptor = reinterpret_cast<SYSTEM_SEGMENT_DESCRIPTOR_64*>(
+                segmentDescriptor);
 
-            segmentInfo.Base |= (upperBase << 32);
+            segmentInfo.Base |= (static_cast<ULONG64>(sysDescriptor->BaseUpper32) << BITS_32::HIGH_SHIFT);
         }
 
         segmentInfo.Limit = static_cast<ULONG32>(
@@ -252,7 +231,7 @@ public:
     }
 
     // the guest registers given as parameters will be obtained via the assembly code
-    bool SetupVmcs(const size_t GuestRsp, const size_t GuestRip)
+    bool SetupVmcs(const UINT64 GuestRsp, const UINT64 GuestRip)
     {
         // turning on selected features for the hypervisor
 
@@ -271,9 +250,7 @@ public:
 
         ULONG primaryControlsRequest = 0;
 
-        // primaryControlsRequest |= PRIMARY_CONTROLS::USE_TPR_SHADOW;
-        // primaryControlsRequest |= PRIMARY_CONTROLS::RDTSC_EXITING;   // intercepts clock checks
-        primaryControlsRequest |= PRIMARY_CONTROLS::USE_MSR_BITMAPS; // intercepts LSTAR/syscall checks
+        primaryControlsRequest |= PRIMARY_CONTROLS::USE_MSR_BITMAPS; // we want to intercept LSTAR/syscall checks
         primaryControlsRequest |= PRIMARY_CONTROLS::ACTIVATE_SECONDARY_CONTROLS;
 
         ULONG primaryControls = 0;
@@ -288,8 +265,11 @@ public:
 
         ULONG secondaryControlsRequest = 0;
 
-        secondaryControlsRequest |= SECONDARY_CONTROLS::ENABLE_VPID;
         secondaryControlsRequest |= SECONDARY_CONTROLS::ENABLE_EPT;
+        secondaryControlsRequest |= SECONDARY_CONTROLS::ENABLE_VPID;
+        secondaryControlsRequest |= SECONDARY_CONTROLS::ENABLE_RDTSCP;
+        secondaryControlsRequest |= SECONDARY_CONTROLS::ENABLE_INVPCID;
+        secondaryControlsRequest |= SECONDARY_CONTROLS::ENABLE_XSAVES;
 
         ULONG secondaryControls = 0;
         if (!AdjustControlValue(
@@ -302,10 +282,8 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::SECONDARY_CPU_BASED_VM_EXEC_CONTROL, secondaryControls);
 
         VMCS_WRITE_SAFE(VMCS_FIELDS::EPT_POINTER, m_eptPointer.All);
-        VMCS_WRITE_SAFE(VMCS_FIELDS::VIRTUAL_APIC_ADDRESS, m_virtualApicPage.value().PhysicalAddress());
 
-        static constexpr size_t VPID = 1;
-        VMCS_WRITE_SAFE(VMCS_FIELDS::VIRTUAL_PROCESSOR_ID, VPID);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::VIRTUAL_PROCESSOR_ID, m_processorIndex + 1); // VPID 0 is reserved
 
         // if not using VMCS shadowing, intel requires this to equal INVALID_POINTER
         VMCS_WRITE_SAFE(VMCS_FIELDS::VMCS_LINK_POINTER, PHYSICAL_MEMORY::INVALID_POINTER);
@@ -358,6 +336,12 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_CR3, __readcr3());
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_CR4, __readcr4());
 
+        static constexpr UINT64 NO_BITS = 0;
+        VMCS_WRITE_SAFE(VMCS_FIELDS::CR0_GUEST_HOST_MASK, NO_BITS); // let the guest own all CR0 bits for now
+        VMCS_WRITE_SAFE(VMCS_FIELDS::CR0_READ_SHADOW, __readcr0());
+        VMCS_WRITE_SAFE(VMCS_FIELDS::CR4_GUEST_HOST_MASK, CR4_FLAGS::VMXE);            // we own VMXE
+        VMCS_WRITE_SAFE(VMCS_FIELDS::CR4_READ_SHADOW, __readcr4() & ~CR4_FLAGS::VMXE); // lying about VMXE
+
         // masking out RPL and TI
         static constexpr USHORT HOST_SEGMENT_SELECTOR_MASK = 0xFFF8;
 
@@ -380,8 +364,8 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_ESP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_ESP)));
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_EIP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_EIP)));
 
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RSP, reinterpret_cast<size_t>(m_hypervisorStack) + HYPERVISOR_STACK_SIZE);
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RIP, reinterpret_cast<size_t>(AsmVmExitHandler));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RSP, reinterpret_cast<UINT64>(m_hypervisorStack) + HYPERVISOR_CONFIG::STACK_SIZE);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RIP, reinterpret_cast<UINT64>(AsmVmExitHandler));
 
         // setting up guest segment registers
 
@@ -470,7 +454,7 @@ public:
     }
 };
 
-extern "C" bool SetupVmcsThunk(Vcpu* Context, size_t GuestRsp, size_t GuestRip)
+extern "C" bool SetupVmcsThunk(Vcpu* Context, UINT64 GuestRsp, UINT64 GuestRip)
 {
     if (Context == nullptr)
     {

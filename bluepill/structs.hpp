@@ -216,6 +216,14 @@ union SEGMENT_DESCRIPTOR
     } Fields;
 };
 
+struct SYSTEM_SEGMENT_DESCRIPTOR_64
+{
+    SEGMENT_DESCRIPTOR BaseDescriptor;
+    // the 64 bit extension
+    ULONG32 BaseUpper32;
+    ULONG32 Reserved;
+};
+
 #pragma pack(pop)
 
 struct SEGMENT_INFO

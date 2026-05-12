@@ -66,4 +66,9 @@ AsmInveptAllContexts PROC
     ret
 AsmInveptAllContexts ENDP
 
+AsmVmcall PROC
+    vmcall
+    ret
+AsmVmcall ENDP
+
 END

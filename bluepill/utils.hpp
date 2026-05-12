@@ -141,4 +141,5 @@ extern "C"
     void AsmGetIdtr(void* Idtr);
 
     void AsmInveptAllContexts(INVEPT_DESCRIPTOR* descriptor);
+    void AsmVmcall(UINT64 code, UINT64 arg1, UINT64 arg2, UINT64 arg3);
 }

@@ -3,6 +3,12 @@
 EXTERN SetupVmcsThunk:PROC
 EXTERN CppVmExitDispatcher:PROC
 
+EXTERN g_ShutdownThisCpu:BYTE
+
+EXTERN g_ShutdownResumeRip:QWORD
+EXTERN g_ShutdownGuestRsp:QWORD
+EXTERN g_ShutdownGuestRflags:QWORD
+
 AsmVirtualize PROC
     push r15
     push r14
@@ -12,46 +18,34 @@ AsmVirtualize PROC
     push rsi
     push rbp
     push rbx
-
-    ; rcx already contains the 'this' pointer passed from Initialize()    
+    
+    ; rcx already contains the 'this' pointer passed from Initialize()
     mov rdx, rsp     
     lea r8, GuestResume 
 
     sub rsp, 28h
     call SetupVmcsThunk 
     add rsp, 28h
+    
+    pop rbx
+    pop rbp
+    pop rsi
+    pop rdi
+    pop r12
+    pop r13
+    pop r14
+    pop r15
 
     test rax, rax
     jz Abort
 
-    pop rbx
-    pop rbp
-    pop rsi
-    pop rdi
-    pop r12
-    pop r13
-    pop r14
-    pop r15
-
     vmlaunch
-
-    ; if vmlaunch fails, we fall through and return FALSE.
-    xor rax, rax
-    ret
-
+    
 Abort:
-    pop rbx
-    pop rbp
-    pop rsi
-    pop rdi
-    pop r12
-    pop r13
-    pop r14
-    pop r15
-
+    ; if we abort or if vmlaunch fails, we fall through and return FALSE.
     xor rax, rax
     ret
-
+    
 GuestResume:
     ; if we reached here vmlaunch has succeeded, so we return TRUE.
     ; we need to pop everything again since we rewinded our stack pointer to the value before the original pops.
@@ -64,10 +58,8 @@ GuestResume:
     pop r13
     pop r14
     pop r15
-
     mov rax, 1 
     ret
-
 AsmVirtualize ENDP
 
 AsmVmExitHandler PROC
@@ -86,7 +78,9 @@ AsmVmExitHandler PROC
     push rdx
     push rcx
     push rax
-
+    
+    ; rsp now points directly to the saved rax (top of the saved GPRs).
+    ; Pass this context pointer to CppVmExitDispatcher via rcx.
     mov rcx, rsp
 
     sub rsp, 512
@@ -106,11 +100,11 @@ AsmVmExitHandler PROC
     vmovups [rsp + 040h], ymm2
     vmovups [rsp + 020h], ymm1
     vmovups [rsp + 000h], ymm0
-
+    
     sub rsp, 28h
     call CppVmExitDispatcher
     add rsp, 28h
-
+    
     vmovups ymm0,  [rsp + 000h]
     vmovups ymm1,  [rsp + 020h]
     vmovups ymm2,  [rsp + 040h]
@@ -145,10 +139,33 @@ AsmVmExitHandler PROC
     pop r14
     pop r15
 
-    vmresume
-    
-    jmp $ ; infinite loop for debugging purposes - as we are not supposed to reach this code
+    cmp byte ptr [g_ShutdownThisCpu], 0
+    jne ShutdownPath
 
+    vmresume
+    jmp $   ; infinite loop for debugging purposes
+
+ShutdownPath:
+    ; clearing the flag for next time so we don't shut down vcpus by accident
+    mov byte ptr [g_ShutdownThisCpu], 0
+
+    ; saving the resume state
+    mov r10, qword ptr [g_ShutdownResumeRip]
+    mov r11, qword ptr [g_ShutdownGuestRsp]
+    mov r12, qword ptr [g_ShutdownGuestRflags]
+
+    vmxoff
+    jc VmxoffFailed   ; CF=1 means vmxoff failed
+    jz VmxoffFailed   ; ZF=1 & CF=0 means the operation is unsupported
+
+    ; switching to guest stack, restoring rflags and jumping back to the instruction after vmcall
+    mov rsp, r11
+    push r12
+    popfq
+    jmp r10
+
+VmxoffFailed:
+    jmp $ ; infinite loop for debugging purposes
 AsmVmExitHandler ENDP
 
 END

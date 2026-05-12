@@ -1,12 +1,10 @@
 #pragma once
 
+#include "constants.hpp"
 #include "ept.hpp"
 #include "vcpu.hpp"
 #include <intrin.h>
 #include <ntddk.h>
-
-// change pool tag later to 'erhT' later to avoid easy detection in memory
-static constexpr ULONG POOL_TAG = 'llip';
 
 class Hypervisor
 {
@@ -18,8 +16,7 @@ private:
     bool IsVmxSupportedGlobally()
     {
         CPUID cpuInfo = { 0 };
-        static constexpr int LEAF_1 = 1;
-        __cpuid(reinterpret_cast<int*>(&cpuInfo), LEAF_1);
+        __cpuid(reinterpret_cast<int*>(&cpuInfo), CPUID_LEAF::VERSION_AND_FEATURES);
 
         if ((cpuInfo.ecx & CPUID_FEATURES::VMX) == 0)
         {
@@ -70,8 +67,8 @@ public:
 
         m_processorCount = KeQueryActiveProcessorCount(NULL);
 
-        size_t vcpuArraySize = sizeof(Vcpu) * m_processorCount;
-        m_vcpus = static_cast<Vcpu*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, vcpuArraySize, POOL_TAG));
+        UINT64 vcpuArraySize = sizeof(Vcpu) * m_processorCount;
+        m_vcpus = static_cast<Vcpu*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, vcpuArraySize, HYPERVISOR_CONFIG::VCPU_ARRAY_TAG));
         if (m_vcpus == nullptr)
         {
             LOG_ERROR("Failed to allocate virtual CPU array.");
@@ -101,7 +98,7 @@ public:
                     KeRevertToUserAffinityThreadEx(rollbackAffinity);
                 }
 
-                ExFreePoolWithTag(m_vcpus, POOL_TAG);
+                ExFreePoolWithTag(m_vcpus, HYPERVISOR_CONFIG::VCPU_ARRAY_TAG);
                 m_vcpus = nullptr;
 
                 return false;
@@ -123,7 +120,7 @@ public:
                 KeRevertToUserAffinityThreadEx(oldAffinity);
             }
 
-            ExFreePoolWithTag(m_vcpus, POOL_TAG);
+            ExFreePoolWithTag(m_vcpus, HYPERVISOR_CONFIG::VCPU_ARRAY_TAG);
             m_vcpus = nullptr;
         }
 

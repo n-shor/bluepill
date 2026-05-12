@@ -72,7 +72,7 @@ public:
         return m_physicalAddress;
     }
 
-    static Optional<ContiguousMemory> allocate(const size_t size)
+    static Optional<ContiguousMemory> allocate(const UINT64 size)
     {
         PHYSICAL_ADDRESS maximumAddress;
         maximumAddress.QuadPart = MAXUINT64;
