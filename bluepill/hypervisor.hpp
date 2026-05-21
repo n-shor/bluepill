@@ -13,6 +13,28 @@ private:
     ULONG m_processorCount = 0;
     VmmEpt m_ept;
 
+    bool IsHostileHypervisorPresent()
+    {
+        // checking if any hypervisor is present
+        int cpuInfo[CPUID_REGISTER::COUNT] = { 0 };
+        __cpuid(cpuInfo, CPUID_LEAF::VERSION_AND_FEATURES);
+
+        if ((cpuInfo[CPUID_REGISTER::ECX] & CPUID_FEATURES::HYPERVISOR_PRESENT) == 0)
+        {
+            return false;
+        }
+
+        __cpuid(cpuInfo, HYPERVISOR_LEAVES::INTERFACE);
+
+        // we don't want to mess with hyper-v
+        if (cpuInfo[CPUID_REGISTER::EAX] == HYPERVISOR_INTERFACE_SIGNATURES::HYPER_V)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     bool IsVmxSupportedGlobally()
     {
         CPUID cpuInfo = { 0 };
@@ -47,6 +69,12 @@ public:
 
     bool Start()
     {
+        if (IsHostileHypervisorPresent())
+        {
+            LOG_ERROR("Hyper-V/VBS are active - disable them in order to run the hypervisor.");
+            return false;
+        }
+
         if (!IsVmxSupportedGlobally())
         {
             LOG_ERROR("Intel VT-x is NOT supported by the CPU.");

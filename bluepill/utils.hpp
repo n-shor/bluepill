@@ -10,6 +10,11 @@
 #define LOG_INFO(fmt, ...)
 #endif
 
+inline void* __cdecl operator new(UINT64, void* p)
+{
+    return p;
+}
+
 void __cdecl operator delete(void*, unsigned __int64);
 
 template <class T>
@@ -40,8 +45,23 @@ public:
     }
 
     Optional(const Optional& other)
-        : m_has(other.m_has), m_value(other.m_value)
+        : m_has(other.m_has), m_dummy(0)
     {
+        if (m_has)
+        {
+            new (&m_value) T(other.m_value);
+        }
+    }
+
+    Optional(Optional&& other) noexcept
+        : m_has(other.m_has), m_dummy(0)
+    {
+        if (m_has)
+        {
+            new (&m_value) T(static_cast<T&&>(other.m_value));
+            (&other.m_value)->~T();
+            other.m_has = false;
+        }
     }
 
     Optional& operator=(const Optional& other)
@@ -51,40 +71,55 @@ public:
             return *this;
         }
 
-        if (this->m_has)
+        if (m_has)
         {
-            (&this->m_value)->~T();
+            if (other.m_has)
+            {
+                m_value = other.m_value;
+            }
+            else
+            {
+                (&m_value)->~T();
+            }
+        }
+        else if (other.m_has)
+        {
+            new (&m_value) T(other.m_value);
         }
 
-        if (other.m_has)
-        {
-            this->m_value = other.m_value;
-        }
-
-        this->m_has = other.m_has;
-
+        m_has = other.m_has;
         return *this;
     }
 
-    Optional& operator=(Optional&& other)
+    Optional& operator=(Optional&& other) noexcept
     {
         if (this == &other)
         {
             return *this;
         }
 
-        if (this->m_has)
+        if (m_has)
         {
-            (&this->m_value)->~T();
+            if (other.m_has)
+            {
+                m_value = static_cast<T&&>(other.m_value);
+            }
+            else
+            {
+                (&m_value)->~T();
+            }
+        }
+        else if (other.m_has)
+        {
+            new (&m_value) T(static_cast<T&&>(other.m_value));
         }
 
+        m_has = other.m_has;
         if (other.m_has)
         {
-            this->m_value = static_cast<T&&>(other.m_value);
+            (&other.m_value)->~T();
+            other.m_has = false;
         }
-
-        this->m_has = other.m_has;
-        other.m_has = false;
 
         return *this;
     }
@@ -104,16 +139,13 @@ public:
 
     T& value() noexcept
     {
-        if (!m_has)
-        {
-            LOG_ERROR("Illegal Optional access.");
-        }
-
+        NT_ASSERT(m_has);
         return m_value;
     }
 
     const T& value() const noexcept
     {
+        NT_ASSERT(m_has);
         return m_value;
     }
 

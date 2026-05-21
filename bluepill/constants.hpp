@@ -33,6 +33,9 @@ enum class VMCS_FIELDS : UINT64
     EXCEPTION_BITMAP = 0x00004004,
     VM_EXIT_CONTROLS = 0x0000400C,
     VM_ENTRY_CONTROLS = 0x00004012,
+    VM_ENTRY_INTERRUPTION_INFO = 0x00004016,
+    VM_ENTRY_EXCEPTION_ERROR_CODE = 0x00004018,
+    VM_ENTRY_INSTRUCTION_LENGTH = 0x0000401A,
     SECONDARY_CPU_BASED_VM_EXEC_CONTROL = 0x0000401E,
 
     VM_INSTRUCTION_ERROR = 0x00004400,
@@ -132,6 +135,17 @@ inline constexpr ULONG STACK_TAG = 'kStS';
 inline constexpr ULONG VCPU_ARRAY_TAG = 'llip';
 } // namespace HYPERVISOR_CONFIG
 
+namespace HYPERVISOR_LEAVES
+{
+inline constexpr UINT64 VENDOR = 0x40000000;
+inline constexpr UINT64 INTERFACE = 0x40000001;
+} // namespace HYPERVISOR_LEAVES
+
+namespace HYPERVISOR_INTERFACE_SIGNATURES
+{
+inline constexpr UINT32 HYPER_V = 0x31237648; // turns into "Hv#1"
+} // namespace HYPERVISOR_INTERFACE_SIGNATURES
+
 namespace CR4_FLAGS
 {
 inline constexpr UINT64 VMXE = 1ull << 13;
@@ -139,7 +153,6 @@ inline constexpr UINT64 VMXE = 1ull << 13;
 
 namespace CPUID_FEATURES
 {
-// Explicitly define these as MASKS, not indices
 inline constexpr UINT64 VMX = 1ull << 5;
 inline constexpr UINT64 HYPERVISOR_PRESENT = 1ull << 31;
 } // namespace CPUID_FEATURES
@@ -188,7 +201,6 @@ inline constexpr ULONG32 IA32E_MODE_GUEST = 1ul << 9;
 namespace PHYSICAL_MEMORY
 {
 inline constexpr UINT64 INVALID_POINTER = ~0ull;
-inline constexpr UINT64 GDT_ENTRY_SIZE = 8;
 } // namespace PHYSICAL_MEMORY
 
 namespace MEMORY_TYPES
@@ -233,6 +245,7 @@ inline constexpr ULONG LIMIT_HIGH = 16;
 inline constexpr ULONG AR_TYPE = 0;
 inline constexpr ULONG AR_SYSTEM = 4;
 inline constexpr ULONG AR_DPL = 5;
+inline constexpr ULONG AR_DPL_MASK = 0b11; // DPL is 2 bits wide
 inline constexpr ULONG AR_PRESENT = 7;
 inline constexpr ULONG AR_AVL = 12;
 inline constexpr ULONG AR_LONG_MODE = 13;
@@ -246,6 +259,30 @@ namespace BITS_32
 inline constexpr UINT64 LOW_MASK = 0xFFFFFFFFull; // masking out the high 32 bits
 inline constexpr UINT64 HIGH_SHIFT = 32;          // shifting to / from the high half of a 64-bit value
 } // namespace BITS_32
+
+namespace EXCEPTION_VECTORS
+{
+inline constexpr UINT32 UD = 6;  // undefined opcode
+inline constexpr UINT32 GP = 13; // general protection
+} // namespace EXCEPTION_VECTORS
+
+namespace EXCEPTION_ERROR_CODES
+{
+inline constexpr UINT32 GP_NON_SEGMENT = 0;
+} // namespace EXCEPTION_ERROR_CODES
+
+namespace CPL
+{
+inline constexpr UINT64 KERNEL = 0;
+inline constexpr UINT64 USER = 3;
+} // namespace CPL
+
+namespace VM_ENTRY_INTERRUPTION
+{
+inline constexpr UINT32 VALID = 1u << 31;
+inline constexpr UINT32 TYPE_HARDWARE_EXCEPTION = 3u << 8;
+inline constexpr UINT32 DELIVER_ERROR_CODE = 1u << 11;
+} // namespace VM_ENTRY_INTERRUPTION
 
 enum class VMEXIT_REASON : UINT64
 {
@@ -284,10 +321,22 @@ enum class VMEXIT_REASON : UINT64
     XSETBV = 55,
 };
 
+namespace VMEXIT_REASON_MASKS
+{
+inline constexpr UINT32 BASIC_REASON = 0xFFFF;
+inline constexpr UINT32 ENTRY_FAILURE_FLAG = 1ul << 31;
+} // namespace VMEXIT_REASON_MASKS
+
 namespace GDT_CONSTANTS
 {
 inline constexpr UINT64 SYSTEM_SEGMENT_FLAG = 0;
+inline constexpr UINT32 NULL_SELECTOR_INDEX = 0;
+inline constexpr UINT64 GDT_ENTRY_SIZE = 8;
 } // namespace GDT_CONSTANTS
 
-inline constexpr UINT64 VMX_BASIC_EXIT_REASON_MASK = 0xFFFF;
-inline constexpr UINT64 VMX_ENTRY_FAILURE_FLAG = 0x80000000;
+namespace VMX_RESULT
+{
+inline constexpr unsigned char SUCCESS = 0;
+inline constexpr unsigned char FAIL_INVALID = 1; // no current VMCS
+inline constexpr unsigned char FAIL_VALID = 2;   // VMCS loaded but instruction rejected
+} // namespace VMX_RESULT

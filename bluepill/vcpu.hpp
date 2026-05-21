@@ -8,12 +8,16 @@
 #include <intrin.h>
 #include <ntddk.h>
 
-#define VMCS_WRITE_SAFE(Field, Value)                                                              \
-    if (__vmx_vmwrite(static_cast<UINT64>(Field), static_cast<UINT64>(Value)) != 0)                \
-    {                                                                                              \
-        LOG_ERROR("Failed to write %s to the VMCS region on core %lu.", #Field, m_processorIndex); \
-        return false;                                                                              \
-    }
+// preventing an else statement from being attached to the if statment in this macro with a do while "loop"
+#define VMCS_WRITE_SAFE(Field, Value)                                                                  \
+    do                                                                                                 \
+    {                                                                                                  \
+        if (__vmx_vmwrite(static_cast<UINT64>(Field), static_cast<UINT64>(Value)) != 0)                \
+        {                                                                                              \
+            LOG_ERROR("Failed to write %s to the VMCS region on core %lu.", #Field, m_processorIndex); \
+            return false;                                                                              \
+        }                                                                                              \
+    } while (false)
 
 class Vcpu;
 
@@ -89,7 +93,7 @@ public:
         // writing the revision ID into the vmxon memory, this is necessary to ensure everything is compatible
         *(reinterpret_cast<ULONG*>(m_vmxon.value().VirtualAddress())) = revisionId;
 
-        if (__vmx_on(&m_vmxon.value().PhysicalAddress()) != 0)
+        if (__vmx_on(&m_vmxon.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
             LOG_ERROR("Failed to execute the __vmx_on() intrinsic.");
 
@@ -106,14 +110,14 @@ public:
 
         *(reinterpret_cast<ULONG*>(m_vmcs.value().VirtualAddress())) = revisionId;
 
-        if (__vmx_vmclear(&m_vmcs.value().PhysicalAddress()) != 0)
+        if (__vmx_vmclear(&m_vmcs.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
             LOG_ERROR("Failed to execute the __vmx_vmclear() intrinsic.");
 
             return false;
         }
 
-        if (__vmx_vmptrld(&m_vmcs.value().PhysicalAddress()) != 0)
+        if (__vmx_vmptrld(&m_vmcs.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
             LOG_ERROR("Failed to execute the __vmx_vmptrld() intrinsic.");
 
@@ -176,7 +180,7 @@ public:
 
         // masking requested bits down to what the hardware allows
         ULONG finalValue = requestedValue & msr.HighPart;
-        finalValue |= msr.LowPart; // forcing required-1 bits
+        finalValue |= msr.LowPart; // forcing required 1 bits
 
         *outAdjustedValue = finalValue;
         return true;
@@ -186,14 +190,14 @@ public:
     {
         SEGMENT_INFO segmentInfo = { 0 };
 
-        if (selector.Fields.Index == 0)
+        if (selector.Fields.Index == GDT_CONSTANTS::NULL_SELECTOR_INDEX)
         {
             segmentInfo.AccessRights = SEGMENT_ACCESS_RIGHTS::UNUSABLE;
             return segmentInfo;
         }
 
         SEGMENT_DESCRIPTOR* segmentDescriptor = reinterpret_cast<SEGMENT_DESCRIPTOR*>(
-            gdtBase + selector.Fields.Index * PHYSICAL_MEMORY::GDT_ENTRY_SIZE);
+            gdtBase + selector.Fields.Index * GDT_CONSTANTS::GDT_ENTRY_SIZE);
 
         segmentInfo.Base = segmentDescriptor->Fields.BaseLow |
                            (segmentDescriptor->Fields.BaseMiddle << SEGMENT_SHIFTS::BASE_MIDDLE) |

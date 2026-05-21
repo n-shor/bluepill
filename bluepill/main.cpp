@@ -2,11 +2,6 @@
 #include "utils.hpp"
 #include <ntddk.h>
 
-inline void* __cdecl operator new(UINT64, void* p)
-{
-    return p;
-}
-
 void __cdecl operator delete(void*, unsigned __int64)
 {
     LOG_ERROR("Something is wrong - non existent delete was called.");

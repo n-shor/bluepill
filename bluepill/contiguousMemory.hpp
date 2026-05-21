@@ -28,6 +28,9 @@ public:
         }
     }
 
+    ContiguousMemory(const ContiguousMemory&) = delete;
+    ContiguousMemory& operator=(const ContiguousMemory&) = delete;
+
     ContiguousMemory(ContiguousMemory&& other) noexcept
     {
         m_virtualAddress = other.m_virtualAddress;
