@@ -141,9 +141,17 @@ inline constexpr UINT64 VENDOR = 0x40000000;
 inline constexpr UINT64 INTERFACE = 0x40000001;
 } // namespace HYPERVISOR_LEAVES
 
+namespace HYPERVISOR_VENDOR_SIGNATURES
+{
+// this turns into "Microsoft Hv"
+inline constexpr UINT32 MICROSOFT_HYPER_V_EBX = 'rciM';
+inline constexpr UINT32 MICROSOFT_HYPER_V_ECX = 'foso';
+inline constexpr UINT32 MICROSOFT_HYPER_V_EDX = 'vH t';
+} // namespace HYPERVISOR_VENDOR_SIGNATURES
+
 namespace HYPERVISOR_INTERFACE_SIGNATURES
 {
-inline constexpr UINT32 HYPER_V = 0x31237648; // turns into "Hv#1"
+inline constexpr UINT32 HYPER_V = '1#vH'; // turns into "Hv#1"
 } // namespace HYPERVISOR_INTERFACE_SIGNATURES
 
 namespace CR4_FLAGS

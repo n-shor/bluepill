@@ -413,7 +413,7 @@ private:
     PVOID AllocateUntrackedTable(UINT64* outPhysicalAddress)
     {
         PHYSICAL_ADDRESS highestAddress;
-        highestAddress.QuadPart = ~0ull;
+        highestAddress.QuadPart = PHYSICAL_MEMORY::INVALID_POINTER;
 
         PVOID table = MmAllocateContiguousMemory(PAGE_SIZE, highestAddress);
         if (table == nullptr)

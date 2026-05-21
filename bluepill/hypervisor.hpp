@@ -26,10 +26,18 @@ private:
 
         __cpuid(cpuInfo, HYPERVISOR_LEAVES::INTERFACE);
 
-        // we don't want to mess with hyper-v
+        // we don't want to mess with hyper-v. someone who wants to mess
+        // with the rootkit could use this to stop it from loading ;)
         if (cpuInfo[CPUID_REGISTER::EAX] == HYPERVISOR_INTERFACE_SIGNATURES::HYPER_V)
         {
-            return true;
+            __cpuid(cpuInfo, HYPERVISOR_LEAVES::VENDOR);
+
+            if (static_cast<UINT32>(cpuInfo[CPUID_REGISTER::EBX]) == HYPERVISOR_VENDOR_SIGNATURES::MICROSOFT_HYPER_V_EBX &&
+                static_cast<UINT32>(cpuInfo[CPUID_REGISTER::ECX]) == HYPERVISOR_VENDOR_SIGNATURES::MICROSOFT_HYPER_V_ECX &&
+                static_cast<UINT32>(cpuInfo[CPUID_REGISTER::EDX]) == HYPERVISOR_VENDOR_SIGNATURES::MICROSOFT_HYPER_V_EDX)
+            {
+                return true;
+            }
         }
 
         return false;
