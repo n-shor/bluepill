@@ -63,6 +63,30 @@ extern "C" volatile UINT64 g_ShutdownResumeRip;
 extern "C" volatile UINT64 g_ShutdownGuestRsp;
 extern "C" volatile UINT64 g_ShutdownGuestRflags;
 
+extern "C" __declspec(noreturn) void HandleVmresumeFailure()
+{
+    UINT64 vmInstructionError = VmcsRead(VMCS_FIELDS::VM_INSTRUCTION_ERROR);
+    UINT64 guestRip = VmcsRead(VMCS_FIELDS::GUEST_RIP);
+
+    LOG_ERROR("VMRESUME failed! VM_INSTRUCTION_ERROR=%llu, guest RIP=0x%llX",
+              vmInstructionError, guestRip);
+
+    _enable();
+    KeBugCheckEx(BUGCHECK_CODES::VMRESUME_FAILURE,
+                 vmInstructionError, guestRip, 0, 0);
+}
+
+extern "C" __declspec(noreturn) void HandleVmxoffFailure()
+{
+    UINT64 vmInstructionError = VmcsRead(VMCS_FIELDS::VM_INSTRUCTION_ERROR);
+
+    LOG_ERROR("VMXOFF failed! VM_INSTRUCTION_ERROR=%llu", vmInstructionError);
+
+    _enable();
+    KeBugCheckEx(BUGCHECK_CODES::VMXOFF_FAILURE,
+                 vmInstructionError, 0, 0, 0);
+}
+
 extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
 {
     UINT64 guestRip = VmcsRead(VMCS_FIELDS::GUEST_RIP);
@@ -74,11 +98,8 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
         LOG_ERROR("VM-Entry failed! Hardware rejection code: %llu", failedReason);
 
         _enable(); // reenabling interrupts so KeBugCheckEx can work
-        KeBugCheckEx(
-            0xDEAD0000,
-            failedReason, // parameter 1: the specific VM-entry failure reason
-            guestRip,     // parameter 2: where the guest was when it failed
-            0, 0);
+        KeBugCheckEx(BUGCHECK_CODES::VM_ENTRY_FAILURE,
+                     failedReason, guestRip, 0, 0);
     }
 
     VMEXIT_REASON exitReason = static_cast<VMEXIT_REASON>(
@@ -124,6 +145,7 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
 
         GuestRegs->Rax = value & BITS_32::LOW_MASK;
         GuestRegs->Rdx = value >> BITS_32::HIGH_SHIFT;
+
         break;
     }
     case VMEXIT_REASON::WRMSR:
@@ -139,6 +161,7 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
         const ULONG64 value = (GuestRegs->Rax & BITS_32::LOW_MASK) | (GuestRegs->Rdx << BITS_32::HIGH_SHIFT);
 
         __writemsr(msrIndex, value);
+
         break;
     }
     case VMEXIT_REASON::XSETBV:
@@ -154,6 +177,7 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
         const ULONG64 value = (GuestRegs->Rax & BITS_32::LOW_MASK) | (GuestRegs->Rdx << BITS_32::HIGH_SHIFT);
 
         _xsetbv(xcrIndex, value);
+
         break;
     }
     case VMEXIT_REASON::EPT_VIOLATION:
@@ -163,12 +187,9 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
         UINT64 faultingGpa = VmcsRead(VMCS_FIELDS::GUEST_PHYSICAL_ADDRESS);
         UINT64 exitQualification = VmcsRead(VMCS_FIELDS::VM_EXIT_QUALIFICATION);
 
-        _enable(); // reenabling interrupts so KeBugCheckEx can work
-        KeBugCheckEx(
-            0xDEAD001,
-            faultingGpa,
-            guestRip,
-            exitQualification, 0);
+        _enable();
+        KeBugCheckEx(BUGCHECK_CODES::EPT_VIOLATION,
+                     faultingGpa, guestRip, exitQualification, 0);
 
         break;
     }
@@ -196,19 +217,20 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
             InjectUdFault();
             advanceRip = false;
         }
+
         break;
     }
     default:
     {
-        LOG_ERROR("Unhandled VM-Exit. Reason: %llu", exitReason);
-        /*
-        _enable(); // reenabling interrupts so KeBugCheckEx can work
-        KeBugCheckEx(
-            0xDEAD0002,
-            static_cast<ULONG64>(exitReason),
-            guestRip,
-            0, 0);
-        */
+        LOG_ERROR("Unhandled VM-Exit. Reason: %llu", static_cast<UINT64>(exitReason));
+        advanceRip = false;
+
+#if DBG
+        _enable();
+        KeBugCheckEx(BUGCHECK_CODES::UNHANDLED_EXIT,
+                     static_cast<ULONG64>(exitReason), guestRip, 0, 0);
+#endif
+
         break;
     }
     }

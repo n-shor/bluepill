@@ -113,6 +113,8 @@ public:
 
         for (ULONG i = 0; i < m_processorCount; ++i)
         {
+            // only works if we have fewer than 64 cores, which is a safe assumption for now.
+            // if we had more than 64 cores, we would need to use processor groups (KeSetSystemGroupAffinityThread)
             KAFFINITY oldAffinity = KeSetSystemAffinityThreadEx(1ull << i);
             bool success = m_vcpus[i].Initialize(i, m_ept.GetEptPointer());
             KeRevertToUserAffinityThreadEx(oldAffinity);
@@ -125,10 +127,8 @@ public:
 
                 // rollback process to ensure we don't destroy anything:
 
-                for (ULONG j = 0; j <= i; ++j)
+                for (ULONG j = 0; j < i; ++j)
                 {
-                    // only works if we have fewer than 64 cores, which is a safe assumption for now.
-                    // if we had more than 64 cores, we would need to use processor groups (KeSetSystemGroupAffinityThread)
                     KAFFINITY rollbackAffinity = KeSetSystemAffinityThreadEx(1ull << j);
                     m_vcpus[j].Teardown();
                     KeRevertToUserAffinityThreadEx(rollbackAffinity);

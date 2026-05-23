@@ -1,5 +1,7 @@
 .code
 
+EXTERN HandleVmresumeFailure:PROC
+EXTERN HandleVmxoffFailure:PROC
 EXTERN SetupVmcsThunk:PROC
 EXTERN CppVmExitDispatcher:PROC
 
@@ -143,7 +145,11 @@ AsmVmExitHandler PROC
     jne ShutdownPath
 
     vmresume
-    jmp $   ; infinite loop for debugging purposes
+
+    ; if we reached this line, vmresume failed
+    sub rsp, 28h
+    call HandleVmresumeFailure
+    int 3   ; HandleVmresumeFailure is noreturn, but if it still returns we trap for debugging purposes
 
 ShutdownPath:
     ; clearing the flag for next time so we don't shut down vcpus by accident
@@ -165,7 +171,10 @@ ShutdownPath:
     jmp r10
 
 VmxoffFailed:
-    jmp $ ; infinite loop for debugging purposes
+    sub rsp, 28h
+    call HandleVmxoffFailure
+    int 3
+
 AsmVmExitHandler ENDP
 
 END

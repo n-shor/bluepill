@@ -335,6 +335,15 @@ inline constexpr UINT32 BASIC_REASON = 0xFFFF;
 inline constexpr UINT32 ENTRY_FAILURE_FLAG = 1ul << 31;
 } // namespace VMEXIT_REASON_MASKS
 
+namespace BUGCHECK_CODES
+{
+inline constexpr ULONG VM_ENTRY_FAILURE = 0xDEAD0001;
+inline constexpr ULONG EPT_VIOLATION = 0xDEAD0002;
+inline constexpr ULONG UNHANDLED_EXIT = 0xDEAD0003;
+inline constexpr ULONG VMRESUME_FAILURE = 0xDEAD0004;
+inline constexpr ULONG VMXOFF_FAILURE = 0xDEAD0005;
+} // namespace BUGCHECK_CODES
+
 namespace GDT_CONSTANTS
 {
 inline constexpr UINT64 SYSTEM_SEGMENT_FLAG = 0;

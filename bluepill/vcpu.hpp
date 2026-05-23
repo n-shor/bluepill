@@ -146,7 +146,10 @@ public:
         // setting up the VMCS and calling vmlaunch
         if (!AsmVirtualize(this))
         {
-            LOG_ERROR("Failed to virtualize CPU!");
+            UINT64 vmInstructionError = VmcsRead(VMCS_FIELDS::VM_INSTRUCTION_ERROR);
+
+            LOG_ERROR("Failed to virtualize on core %lu. VM_INSTRUCTION_ERROR=%llu",
+                      m_processorIndex, vmInstructionError);
 
             return false;
         }
@@ -178,11 +181,19 @@ public:
         LARGE_INTEGER msr;
         msr.QuadPart = msrValue;
 
-        // masking requested bits down to what the hardware allows
+        // bits the caller requested that the hardware doesn't allow
+        ULONG disallowedRequested = requestedValue & ~msr.HighPart;
+        if (disallowedRequested != 0)
+        {
+            LOG_ERROR("Requested control bits 0x%lX not supported by hardware (allowed mask = 0x%lX).",
+                      disallowedRequested, msr.HighPart);
+            return false;
+        }
+
         ULONG finalValue = requestedValue & msr.HighPart;
         finalValue |= msr.LowPart; // forcing required 1 bits
-
         *outAdjustedValue = finalValue;
+
         return true;
     }
 
