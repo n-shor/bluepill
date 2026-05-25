@@ -164,6 +164,11 @@ ShutdownPath:
     jc VmxoffFailed   ; CF=1 means vmxoff failed
     jz VmxoffFailed   ; ZF=1 & CF=0 means the operation is unsupported
 
+    ; clearing CR4.VMXE so the postv mxoff guest won't see we were virtualized
+    mov rax, cr4
+    btr rax, 13
+    mov cr4, rax
+
     ; switching to guest stack, restoring rflags and jumping back to the instruction after vmcall
     mov rsp, r11
     push r12

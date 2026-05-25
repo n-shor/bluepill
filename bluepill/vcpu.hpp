@@ -171,6 +171,7 @@ public:
             m_hypervisorStack = nullptr;
         }
 
+        // we already did this in the assembly code but i left it here just for safety
         DisableVmx();
 
         LOG_INFO("VCPU %lu successfully powered down and memory freed.", m_processorIndex);

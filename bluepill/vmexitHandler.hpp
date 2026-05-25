@@ -70,10 +70,16 @@ extern "C" __declspec(noreturn) void HandleVmresumeFailure()
 
     LOG_ERROR("VMRESUME failed! VM_INSTRUCTION_ERROR=%llu, guest RIP=0x%llX",
               vmInstructionError, guestRip);
-
+#if DBG
     _enable();
     KeBugCheckEx(BUGCHECK_CODES::VMRESUME_FAILURE,
                  vmInstructionError, guestRip, 0, 0);
+#else
+    while (true)
+    {
+        _mm_pause();
+    }
+#endif
 }
 
 extern "C" __declspec(noreturn) void HandleVmxoffFailure()
@@ -82,9 +88,16 @@ extern "C" __declspec(noreturn) void HandleVmxoffFailure()
 
     LOG_ERROR("VMXOFF failed! VM_INSTRUCTION_ERROR=%llu", vmInstructionError);
 
+#if DBG
     _enable();
     KeBugCheckEx(BUGCHECK_CODES::VMXOFF_FAILURE,
                  vmInstructionError, 0, 0, 0);
+#else
+    while (true)
+    {
+        _mm_pause();
+    }
+#endif
 }
 
 extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
@@ -187,9 +200,14 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
         UINT64 faultingGpa = VmcsRead(VMCS_FIELDS::GUEST_PHYSICAL_ADDRESS);
         UINT64 exitQualification = VmcsRead(VMCS_FIELDS::VM_EXIT_QUALIFICATION);
 
+        LOG_ERROR("Unexpected EPT violation. GPA=0x%llX RIP=0x%llX Qualification=0x%llX",
+                  faultingGpa, guestRip, exitQualification);
+
+#if DBG
         _enable();
         KeBugCheckEx(BUGCHECK_CODES::EPT_VIOLATION,
                      faultingGpa, guestRip, exitQualification, 0);
+#endif
 
         break;
     }
