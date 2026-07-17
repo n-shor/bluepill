@@ -133,6 +133,7 @@ inline constexpr UINT64 SHUTDOWN_HYPERCALL = 0xDEADDEADDEADull;
 // change later as usual
 inline constexpr ULONG STACK_TAG = 'kStS';
 inline constexpr ULONG VCPU_ARRAY_TAG = 'llip';
+inline constexpr ULONG HOST_GDT_TAG = 'tDGh';
 } // namespace HYPERVISOR_CONFIG
 
 namespace HYPERVISOR_LEAVES
@@ -247,6 +248,7 @@ namespace SEGMENT_SHIFTS
 {
 inline constexpr ULONG BASE_MIDDLE = 16;
 inline constexpr ULONG BASE_HIGH = 24;
+inline constexpr ULONG BASE_UPPER = 32;
 
 inline constexpr ULONG LIMIT_HIGH = 16;
 
@@ -261,6 +263,11 @@ inline constexpr ULONG AR_DEFAULT_BIG = 14;
 inline constexpr ULONG AR_GRANULARITY = 15;
 inline constexpr ULONG AR_UNUSABLE = 16;
 } // namespace SEGMENT_SHIFTS
+
+namespace BITS_16
+{
+inline constexpr UINT64 HIGH_SHIFT = 16; // shifting to / from the high half of a 32-bit value
+} // namespace BITS_16
 
 namespace BITS_32
 {
@@ -349,6 +356,10 @@ namespace GDT_CONSTANTS
 inline constexpr UINT64 SYSTEM_SEGMENT_FLAG = 0;
 inline constexpr UINT32 NULL_SELECTOR_INDEX = 0;
 inline constexpr UINT64 GDT_ENTRY_SIZE = 8;
+inline constexpr UINT64 SYSTEM_DESCRIPTOR_SIZE = 16;
+inline constexpr UINT64 ALIGNMENT = 8;
+inline constexpr UINT64 ALIGNMENT_MASK = ALIGNMENT - 1;
+inline constexpr UINT32 VMX_HOST_TR_LIMIT = 0x67;
 } // namespace GDT_CONSTANTS
 
 namespace VMX_RESULT
@@ -357,3 +368,12 @@ inline constexpr unsigned char SUCCESS = 0;
 inline constexpr unsigned char FAIL_INVALID = 1; // no current VMCS
 inline constexpr unsigned char FAIL_VALID = 2;   // VMCS loaded but instruction rejected
 } // namespace VMX_RESULT
+
+namespace DESCRIPTOR_TYPES
+{
+namespace TSS
+{
+inline constexpr UINT64 AVAILABLE = 9;
+inline constexpr UINT64 BUSY = 11;
+} // namespace TSS
+} // namespace DESCRIPTOR_TYPES

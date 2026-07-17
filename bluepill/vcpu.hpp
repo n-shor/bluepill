@@ -1,14 +1,13 @@
 #pragma once
 
 #include "constants.hpp"
-#include "contiguousMemory.hpp"
+#include "raii.hpp"
 #include "structs.hpp"
 #include "utils.hpp"
 #include "vmexitHandler.hpp"
 #include <intrin.h>
 #include <ntddk.h>
 
-// preventing an else statement from being attached to the if statment in this macro with a do while "loop"
 #define VMCS_WRITE_SAFE(Field, Value)                                                                  \
     do                                                                                                 \
     {                                                                                                  \
@@ -27,36 +26,85 @@ extern "C" bool AsmVmExitHandler(Vcpu* Context);
 class Vcpu
 {
 private:
-    ULONG m_processorIndex;
-    EPT_POINTER m_eptPointer;
+    ULONG m_processorIndex = 0;
+    EPT_POINTER m_eptPointer = {};
+
     Optional<ContiguousMemory> m_vmxon;
     Optional<ContiguousMemory> m_vmcs;
     Optional<ContiguousMemory> m_msrBitmap;
-    PVOID m_hypervisorStack = nullptr;
+    Optional<PoolBuffer> m_hypervisorStack;
+    Optional<HostGdt> m_hostGdt;
 
-    void EnableVmx()
+    bool m_vmxeEnabled = false;
+    bool m_vmxonExecuted = false;
+    bool m_isLaunched = false;
+
+    Vcpu() = default;
+
+    void EnableVmx() noexcept
     {
-        const unsigned long long oldCr4 = __readcr4();
-
-        __writecr4(oldCr4 | CR4_FLAGS::VMXE);
+        __writecr4(__readcr4() | CR4_FLAGS::VMXE);
+        m_vmxeEnabled = true;
     }
 
-    void DisableVmx()
+    void DisableVmx() noexcept
     {
-        const unsigned long long oldCr4 = __readcr4();
-
-        __writecr4(oldCr4 & (~CR4_FLAGS::VMXE));
+        __writecr4(__readcr4() & ~CR4_FLAGS::VMXE);
+        m_vmxeEnabled = false;
     }
 
 public:
-    Vcpu() = default;
-    ~Vcpu() = default;
-
-    // needs to run on the specific core this VCPU object is assigned to
-    bool Initialize(const ULONG processorIndex, const EPT_POINTER eptPointer)
+    ~Vcpu() noexcept
     {
-        m_processorIndex = processorIndex;
-        m_eptPointer = eptPointer;
+        const bool didTeardown = m_isLaunched || m_vmxonExecuted || m_vmxeEnabled;
+
+        if (m_isLaunched)
+        {
+            AsmVmcall(HYPERVISOR_CONFIG::SHUTDOWN_HYPERCALL, 0, 0, 0);
+        }
+        else if (m_vmxonExecuted)
+        {
+            __vmx_off();
+        }
+
+        if (m_vmxeEnabled)
+        {
+            DisableVmx();
+        }
+
+        if (didTeardown)
+        {
+            LOG_INFO("VCPU %lu successfully powered down and memory freed.", m_processorIndex);
+        }
+    }
+
+    Vcpu(const Vcpu&) = delete;
+    Vcpu& operator=(const Vcpu&) = delete;
+
+    Vcpu(Vcpu&& other) noexcept
+        : m_processorIndex(other.m_processorIndex),
+          m_eptPointer(other.m_eptPointer),
+          m_vmxon(static_cast<Optional<ContiguousMemory>&&>(other.m_vmxon)),
+          m_vmcs(static_cast<Optional<ContiguousMemory>&&>(other.m_vmcs)),
+          m_msrBitmap(static_cast<Optional<ContiguousMemory>&&>(other.m_msrBitmap)),
+          m_hypervisorStack(static_cast<Optional<PoolBuffer>&&>(other.m_hypervisorStack)),
+          m_hostGdt(static_cast<Optional<HostGdt>&&>(other.m_hostGdt)),
+          m_vmxeEnabled(other.m_vmxeEnabled), m_vmxonExecuted(other.m_vmxonExecuted),
+          m_isLaunched(other.m_isLaunched)
+    {
+        other.m_vmxeEnabled = false;
+        other.m_vmxonExecuted = false;
+        other.m_isLaunched = false;
+    }
+
+    Vcpu& operator=(Vcpu&&) = delete;
+
+    // needs to run while pinned to the specific core this VCPU object will be assigned to
+    static Optional<Vcpu> Create(const ULONG processorIndex, const EPT_POINTER eptPointer)
+    {
+        Vcpu vcpu;
+        vcpu.m_processorIndex = processorIndex;
+        vcpu.m_eptPointer = eptPointer;
 
         IA32_FEATURE_CONTROL_MSR featureControl = { 0 };
         featureControl.All = __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_FEATURE_CONTROL));
@@ -65,121 +113,103 @@ public:
         {
             featureControl.Fields.Lock = TRUE;
             featureControl.Fields.EnableVMXON = TRUE;
-
             __writemsr(static_cast<ULONG>(SYSTEM_MSR::IA32_FEATURE_CONTROL), featureControl.All);
         }
         else if (featureControl.Fields.EnableVMXON == FALSE)
         {
-            LOG_ERROR("VMX locked off by BIOS on core %lu.", m_processorIndex);
-
-            return false;
+            LOG_ERROR("VMX locked off by BIOS on core %lu.", processorIndex);
+            return Optional<Vcpu>();
         }
 
-        EnableVmx();
+        vcpu.EnableVmx();
 
-        m_vmxon = ContiguousMemory::allocate(PAGE_SIZE);
-        if (!m_vmxon.has())
+        vcpu.m_vmxon = ContiguousMemory::allocate(PAGE_SIZE);
+        if (!vcpu.m_vmxon.has())
         {
             LOG_ERROR("Failed to allocate contiguous memory for the VMXON region.");
-
-            return false;
+            return Optional<Vcpu>();
         }
 
         IA32_VMX_BASIC_MSR vmxBasic = { 0 };
-
         vmxBasic.All = __readmsr(static_cast<ULONG>(VMX_MSR::IA32_BASIC));
         ULONG revisionId = static_cast<ULONG>(vmxBasic.All);
 
         // writing the revision ID into the vmxon memory, this is necessary to ensure everything is compatible
-        *(reinterpret_cast<ULONG*>(m_vmxon.value().VirtualAddress())) = revisionId;
+        *(reinterpret_cast<ULONG*>(vcpu.m_vmxon.value().VirtualAddress())) = revisionId;
 
-        if (__vmx_on(&m_vmxon.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
+        if (__vmx_on(&vcpu.m_vmxon.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
             LOG_ERROR("Failed to execute the __vmx_on() intrinsic.");
-
-            return false;
+            return Optional<Vcpu>();
         }
+        vcpu.m_vmxonExecuted = true;
 
-        m_vmcs = ContiguousMemory::allocate(PAGE_SIZE);
-        if (!m_vmcs.has())
+        vcpu.m_vmcs = ContiguousMemory::allocate(PAGE_SIZE);
+        if (!vcpu.m_vmcs.has())
         {
             LOG_ERROR("Failed to allocate contiguous memory for the VMCS region.");
-
-            return false;
+            return Optional<Vcpu>();
         }
 
-        *(reinterpret_cast<ULONG*>(m_vmcs.value().VirtualAddress())) = revisionId;
+        *(reinterpret_cast<ULONG*>(vcpu.m_vmcs.value().VirtualAddress())) = revisionId;
 
-        if (__vmx_vmclear(&m_vmcs.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
+        if (__vmx_vmclear(&vcpu.m_vmcs.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
             LOG_ERROR("Failed to execute the __vmx_vmclear() intrinsic.");
-
-            return false;
+            return Optional<Vcpu>();
         }
 
-        if (__vmx_vmptrld(&m_vmcs.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
+        if (__vmx_vmptrld(&vcpu.m_vmcs.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
             LOG_ERROR("Failed to execute the __vmx_vmptrld() intrinsic.");
-
-            return false;
+            return Optional<Vcpu>();
         }
 
-        m_msrBitmap = ContiguousMemory::allocate(PAGE_SIZE);
-        if (!m_msrBitmap.has())
+        vcpu.m_msrBitmap = ContiguousMemory::allocate(PAGE_SIZE);
+        if (!vcpu.m_msrBitmap.has())
         {
             LOG_ERROR("Failed to allocate contiguous memory for the MSR Bitmap.");
-
-            return false;
+            return Optional<Vcpu>();
         }
 
-        m_hypervisorStack = ExAllocatePool2(
-            POOL_FLAG_NON_PAGED, HYPERVISOR_CONFIG::STACK_SIZE, HYPERVISOR_CONFIG::STACK_TAG);
-        if (!m_hypervisorStack)
+        vcpu.m_hypervisorStack = PoolBuffer::allocate(
+            HYPERVISOR_CONFIG::STACK_SIZE, POOL_FLAG_NON_PAGED, HYPERVISOR_CONFIG::STACK_TAG);
+        if (!vcpu.m_hypervisorStack.has())
         {
             LOG_ERROR("Failed to allocate host stack.");
-
-            return false;
+            return Optional<Vcpu>();
         }
 
-        LOG_INFO("VCPU %lu successfully initialized.", m_processorIndex);
+        SYSTEM_DESCRIPTOR_TABLE_REGISTER guestGdtr = { 0 };
+        AsmGetGdtr(&guestGdtr);
 
-        // setting up the VMCS and calling vmlaunch
-        if (!AsmVirtualize(this))
+        vcpu.m_hostGdt = HostGdt::allocate(
+            guestGdtr, AsmGetTr(), GDT_CONSTANTS::VMX_HOST_TR_LIMIT);
+
+        if (!vcpu.m_hostGdt.has())
+        {
+            LOG_ERROR("Failed to allocate host GDT on core %lu.", processorIndex);
+            return Optional<Vcpu>();
+        }
+
+        LOG_INFO("VCPU %lu successfully initialized.", processorIndex);
+
+        // setting up the VMCS, then vmlaunch
+        if (!AsmVirtualize(&vcpu))
         {
             UINT64 vmInstructionError = VmcsRead(VMCS_FIELDS::VM_INSTRUCTION_ERROR);
-
             LOG_ERROR("Failed to virtualize on core %lu. VM_INSTRUCTION_ERROR=%llu",
-                      m_processorIndex, vmInstructionError);
-
-            return false;
+                      processorIndex, vmInstructionError);
+            return Optional<Vcpu>();
         }
+        vcpu.m_isLaunched = true;
 
-        return true;
-    }
-
-    void Teardown()
-    {
-        AsmVmcall(HYPERVISOR_CONFIG::SHUTDOWN_HYPERCALL, 0, 0, 0);
-
-        m_vmxon.clear();
-        m_vmcs.clear();
-        m_msrBitmap.clear();
-
-        if (m_hypervisorStack != nullptr)
-        {
-            ExFreePoolWithTag(m_hypervisorStack, HYPERVISOR_CONFIG::STACK_TAG);
-            m_hypervisorStack = nullptr;
-        }
-
-        // we already did this in the assembly code but i left it here just for safety
-        DisableVmx();
-
-        LOG_INFO("VCPU %lu successfully powered down and memory freed.", m_processorIndex);
+        return Optional<Vcpu>(static_cast<Vcpu&&>(vcpu));
     }
 
     static bool AdjustControlValue(ULONG requestedValue, ULONG64 msrValue, ULONG* outAdjustedValue)
     {
-        LARGE_INTEGER msr;
+        LARGE_INTEGER msr = { 0 };
         msr.QuadPart = msrValue;
 
         // bits the caller requested that the hardware doesn't allow
@@ -198,7 +228,8 @@ public:
         return true;
     }
 
-    static SEGMENT_INFO GetSegmentInfo(SEGMENT_SELECTOR selector, ULONG64 gdtBase)
+    static SEGMENT_INFO
+    GetSegmentInfo(SEGMENT_SELECTOR selector, ULONG64 gdtBase)
     {
         SEGMENT_INFO segmentInfo = { 0 };
 
@@ -380,7 +411,8 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_ESP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_ESP)));
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_EIP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_EIP)));
 
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RSP, reinterpret_cast<UINT64>(m_hypervisorStack) + HYPERVISOR_CONFIG::STACK_SIZE);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RSP,
+                        reinterpret_cast<UINT64>(m_hypervisorStack.value().Pointer()) + HYPERVISOR_CONFIG::STACK_SIZE);
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RIP, reinterpret_cast<UINT64>(AsmVmExitHandler));
 
         // setting up guest segment registers
@@ -450,7 +482,8 @@ public:
 
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GDTR_BASE, gdtr.Base);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GDTR_LIMIT, gdtr.Limit);
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_GDTR_BASE, gdtr.Base);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_GDTR_BASE, m_hostGdt.value().Base());
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_TR_BASE, trInfo.Base);
 
         // setting up the IDT
 
@@ -460,11 +493,6 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_IDTR_BASE, idtr.Base);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_IDTR_LIMIT, idtr.Limit);
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IDTR_BASE, idtr.Base);
-
-        // setting up the TR
-
-        SEGMENT_INFO hostTrInfo = GetSegmentInfo({ AsmGetTr() }, gdtr.Base);
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_TR_BASE, hostTrInfo.Base);
 
         return true;
     }

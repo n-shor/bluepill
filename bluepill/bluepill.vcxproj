@@ -100,6 +100,7 @@
     <ClInclude Include="contiguousMemory.hpp" />
     <ClInclude Include="ept.hpp" />
     <ClInclude Include="hypervisor.hpp" />
+    <ClInclude Include="raii.hpp" />
     <ClInclude Include="structs.hpp" />
     <ClInclude Include="utils.hpp" />
     <ClInclude Include="vcpu.hpp" />

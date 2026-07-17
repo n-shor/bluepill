@@ -57,12 +57,6 @@ inline void InjectUdFault()
     InjectException(EXCEPTION_VECTORS::UD, false, NULL);
 }
 
-extern "C" volatile bool g_ShutdownThisCpu;
-
-extern "C" volatile UINT64 g_ShutdownResumeRip;
-extern "C" volatile UINT64 g_ShutdownGuestRsp;
-extern "C" volatile UINT64 g_ShutdownGuestRflags;
-
 extern "C" __declspec(noreturn) void HandleVmresumeFailure()
 {
     UINT64 vmInstructionError = VmcsRead(VMCS_FIELDS::VM_INSTRUCTION_ERROR);
@@ -100,7 +94,7 @@ extern "C" __declspec(noreturn) void HandleVmxoffFailure()
 #endif
 }
 
-extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
+extern "C" bool CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
 {
     UINT64 guestRip = VmcsRead(VMCS_FIELDS::GUEST_RIP);
     UINT64 fullExitReason = VmcsRead(VMCS_FIELDS::VM_EXIT_REASON);
@@ -109,16 +103,23 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
     {
         UINT64 failedReason = fullExitReason & VMEXIT_REASON_MASKS::BASIC_REASON;
         LOG_ERROR("VM-Entry failed! Hardware rejection code: %llu", failedReason);
-
+#if DBG
         _enable(); // reenabling interrupts so KeBugCheckEx can work
         KeBugCheckEx(BUGCHECK_CODES::VM_ENTRY_FAILURE,
                      failedReason, guestRip, 0, 0);
+#else
+        while (true)
+        {
+            _mm_pause();
+        }
+#endif
     }
 
     VMEXIT_REASON exitReason = static_cast<VMEXIT_REASON>(
         fullExitReason & VMEXIT_REASON_MASKS::BASIC_REASON);
     UINT64 instructionLength = VmcsRead(VMCS_FIELDS::VM_EXIT_INSTRUCTION_LEN);
 
+    bool shutdownRequested = false;
     bool advanceRip = true;
 
     switch (static_cast<VMEXIT_REASON>(exitReason))
@@ -215,18 +216,8 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
     {
         if (GuestRegs->Rcx == HYPERVISOR_CONFIG::SHUTDOWN_HYPERCALL)
         {
-            // gathering everything we need to return to the guest before vmxoff
-            g_ShutdownResumeRip = guestRip + instructionLength;
-            g_ShutdownGuestRsp = VmcsRead(VMCS_FIELDS::GUEST_RSP);
-            g_ShutdownGuestRflags = VmcsRead(VMCS_FIELDS::GUEST_RFLAGS);
-
-            // we need to write the data globals before the shutdown flag so the asm
-            // code never sees g_ShutdownThisCpu == true with stale resume info
-            _WriteBarrier();
-
-            g_ShutdownThisCpu = true;
-
-            advanceRip = false; // we set RIP manually via the resume path
+            // we advance RIP normally here so the assembly code can read the next RIP from the VMCS
+            shutdownRequested = true;
         }
         else
         {
@@ -256,8 +247,9 @@ extern "C" void CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
     // we advance RIP, otherwise the guest will execute the same instruction after we run vmresume
     if (advanceRip)
     {
-        __vmx_vmwrite(static_cast<UINT64>(VMCS_FIELDS::GUEST_RIP), guestRip + instructionLength);
+        __vmx_vmwrite(static_cast<UINT64>(VMCS_FIELDS::GUEST_RIP),
+                      guestRip + instructionLength);
     }
 
-    // after we return from this function, the assembly code will run vmresume
+    return shutdownRequested;
 }

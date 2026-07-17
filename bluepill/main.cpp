@@ -11,13 +11,6 @@ Hypervisor* g_Hypervisor = nullptr;
 // change later to 'erhT' to make it less obvious
 static constexpr ULONG HYPER_TAG = 'pyhG';
 
-// only one CPU tears down at a time, so a single global is fine.
-extern "C" volatile bool g_ShutdownThisCpu = false;
-
-extern "C" volatile UINT64 g_ShutdownResumeRip = 0;
-extern "C" volatile UINT64 g_ShutdownGuestRsp = 0;
-extern "C" volatile UINT64 g_ShutdownGuestRflags = 0;
-
 void DriverUnload(PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER(DriverObject);
