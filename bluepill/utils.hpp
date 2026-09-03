@@ -1,4 +1,5 @@
 #pragma once
+#include <ntifs.h>
 
 #if DBG
 // in Debug mode, we print to the kernel debugger

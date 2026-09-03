@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ntddk.h>
+#include <ntifs.h>
 
 typedef struct _CPUID
 {
@@ -37,15 +37,15 @@ typedef union _IA32_VMX_BASIC_MSR
     {
         UINT64 RevisionIdentifier : 31;
         UINT64 Reserved1 : 1;
-        UINT64 RegionSize : 12;
-        UINT64 RegionClear : 1;
+        UINT64 RegionSize : 13;
         UINT64 Reserved2 : 3;
-        UINT64 SupportedIA64 : 1;
-        UINT64 SupportedDualMoniter : 1;
+        UINT64 AddressesLimitedTo32Bits : 1;
+        UINT64 SupportsDualMonitorSmm : 1;
         UINT64 MemoryType : 4;
-        UINT64 VmExitReport : 1;
-        UINT64 VmxCapabilityHint : 1;
-        UINT64 Reserved3 : 8;
+        UINT64 ReportsInsOutsExitInformation : 1;
+        UINT64 SupportsTrueControlMsrs : 1;
+        UINT64 SupportsAnyVectorExceptionInjection : 1;
+        UINT64 Reserved3 : 7;
     } Fields;
 } IA32_VMX_BASIC_MSR, *PIA32_VMX_BASIC_MSR;
 
@@ -58,7 +58,7 @@ typedef union _IA32_VMX_EPT_VPID_CAP_MSR
         UINT64 Reserved1 : 5;
         UINT64 SupportPageWalkLength4 : 1;
         UINT64 Reserved2 : 1;
-        UINT64 SupportUncachebleMemoryType : 1;
+        UINT64 SupportUncacheableMemoryType : 1;
         UINT64 Reserved3 : 5;
         UINT64 SupportWriteBackMemoryType : 1;
         UINT64 Reserved4 : 1;
@@ -88,7 +88,7 @@ typedef union _EPT_POINTER
     {
         UINT64 MemoryType : 3;
         UINT64 PageWalkLength : 3;
-        UINT64 DirtyAndAceessEnabled : 1;
+        UINT64 EnableAccessedAndDirtyFlags : 1;
         UINT64 Reserved1 : 5;
         UINT64 PageMapLevel4Address : 36;
         UINT64 Reserved2 : 16;
@@ -180,39 +180,39 @@ typedef union _EPT_PTE
 
 struct SYSTEM_DESCRIPTOR_TABLE_REGISTER
 {
-    USHORT Limit;
-    ULONG64 Base;
+    UINT16 Limit;
+    UINT64 Base;
 };
 
 union SEGMENT_SELECTOR
 {
-    USHORT All;
+    UINT16 All;
     struct
     {
-        USHORT RPL : 2;    // requested privilege level
-        USHORT TI : 1;     // table indicator
-        USHORT Index : 13; // index into the array
+        UINT64 RPL : 2;    // requested privilege level
+        UINT64 TI : 1;     // table indicator
+        UINT64 Index : 13; // index into the array
     } Fields;
 };
 
 union SEGMENT_DESCRIPTOR
 {
-    ULONG64 All;
+    UINT64 All;
     struct
     {
-        ULONG64 LimitLow : 16;
-        ULONG64 BaseLow : 16;
-        ULONG64 BaseMiddle : 8;
-        ULONG64 Type : 4;
-        ULONG64 System : 1;
-        ULONG64 DPL : 2;
-        ULONG64 Present : 1;
-        ULONG64 LimitHigh : 4;
-        ULONG64 AVL : 1;
-        ULONG64 LongMode : 1;
-        ULONG64 DefaultBig : 1;
-        ULONG64 Granularity : 1;
-        ULONG64 BaseHigh : 8;
+        UINT64 LimitLow : 16;
+        UINT64 BaseLow : 16;
+        UINT64 BaseMiddle : 8;
+        UINT64 Type : 4;
+        UINT64 System : 1;
+        UINT64 DPL : 2;
+        UINT64 Present : 1;
+        UINT64 LimitHigh : 4;
+        UINT64 AVL : 1;
+        UINT64 LongMode : 1;
+        UINT64 DefaultBig : 1;
+        UINT64 Granularity : 1;
+        UINT64 BaseHigh : 8;
     } Fields;
 };
 
@@ -220,36 +220,36 @@ struct SYSTEM_SEGMENT_DESCRIPTOR_64
 {
     SEGMENT_DESCRIPTOR BaseDescriptor;
     // the 64 bit extension
-    ULONG32 BaseUpper32;
-    ULONG32 Reserved;
+    UINT32 BaseUpper32;
+    UINT32 Reserved;
 };
 
 #pragma pack(pop)
 
 struct SEGMENT_INFO
 {
-    ULONG64 Base;
-    ULONG32 Limit;
-    ULONG32 AccessRights;
+    UINT64 Base;
+    UINT32 Limit;
+    UINT32 AccessRights;
 };
 
 struct GUEST_REGISTERS
 {
-    ULONG64 Rax;
-    ULONG64 Rcx;
-    ULONG64 Rdx;
-    ULONG64 Rbx;
-    ULONG64 Rbp;
-    ULONG64 Rsi;
-    ULONG64 Rdi;
-    ULONG64 R8;
-    ULONG64 R9;
-    ULONG64 R10;
-    ULONG64 R11;
-    ULONG64 R12;
-    ULONG64 R13;
-    ULONG64 R14;
-    ULONG64 R15;
+    UINT64 Rax;
+    UINT64 Rcx;
+    UINT64 Rdx;
+    UINT64 Rbx;
+    UINT64 Rbp;
+    UINT64 Rsi;
+    UINT64 Rdi;
+    UINT64 R8;
+    UINT64 R9;
+    UINT64 R10;
+    UINT64 R11;
+    UINT64 R12;
+    UINT64 R13;
+    UINT64 R14;
+    UINT64 R15;
 };
 
 typedef union _EPT_PDE_2MB
@@ -278,4 +278,13 @@ struct INVEPT_DESCRIPTOR
 {
     UINT64 EptPointer;
     UINT64 Reserved;
+};
+
+namespace HOST_STACK
+{
+inline constexpr UINT64 ALIGNMENT = 16;
+}; // namespace HOST_STACK
+
+struct alignas(HOST_STACK::ALIGNMENT) HOST_STACK_CONTEXT
+{
 };

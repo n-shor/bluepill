@@ -5,8 +5,9 @@
 #include "raii.hpp"
 #include "utils.hpp"
 #include "vcpu.hpp"
+#include "vmxCapabilities.hpp"
 #include <intrin.h>
-#include <ntddk.h>
+#include <ntifs.h>
 
 class Hypervisor
 {
@@ -14,6 +15,7 @@ private:
     Optional<PoolBuffer> m_vcpuBuffer;
     ULONG m_vcpusConstructed = 0;
     ULONG m_processorCount = 0;
+    UINT64 m_systemCr3 = 0;
     VmmEpt m_ept;
 
     Vcpu* Vcpus() noexcept
@@ -21,7 +23,7 @@ private:
         return static_cast<Vcpu*>(m_vcpuBuffer.value().Pointer());
     }
 
-    bool IsHostileHypervisorPresent()
+    static bool IsHostileHypervisorPresent()
     {
         // checking if any hypervisor is present
         int cpuInfo[CPUID_REGISTER::COUNT] = { 0 };
@@ -51,7 +53,7 @@ private:
         return false;
     }
 
-    bool IsVmxSupportedGlobally()
+    static bool IsVmxSupportedGlobally()
     {
         CPUID cpuInfo = { 0 };
         __cpuid(reinterpret_cast<int*>(&cpuInfo), CPUID_LEAF::VERSION_AND_FEATURES);
@@ -64,15 +66,30 @@ private:
         return true;
     }
 
-    bool IsEptSupportedGlobally()
+    static UINT64 GetSystemProcessCr3()
     {
-        IA32_VMX_EPT_VPID_CAP_MSR eptVpidCap = { 0 };
+        KAPC_STATE apcState = { 0 };
 
-        eptVpidCap.All = __readmsr(static_cast<ULONG>(VMX_MSR::IA32_EPT_VPID_CAP));
+        KeStackAttachProcess(reinterpret_cast<PRKPROCESS>(PsInitialSystemProcess), &apcState);
+        const UINT64 systemCr3 = __readcr3();
+        KeUnstackDetachProcess(&apcState);
 
-        return eptVpidCap.Fields.SupportPageWalkLength4 &&
-               eptVpidCap.Fields.SupportWriteBackMemoryType &&
-               eptVpidCap.Fields.SupportPde2mbPages;
+        return systemCr3;
+    }
+
+    static bool IsEptSupportedGlobally()
+    {
+        Optional<IA32_VMX_EPT_VPID_CAP_MSR> eptVpidCap = VmxCapabilities::TryReadEptVpidCap();
+        if (!eptVpidCap.has())
+        {
+            LOG_ERROR("Neither EPT nor VPID is reported in the secondary controls, "
+                      "so IA32_VMX_EPT_VPID_CAP does not exist on this CPU.");
+            return false;
+        }
+
+        return eptVpidCap.value().Fields.SupportPageWalkLength4 &&
+               eptVpidCap.value().Fields.SupportWriteBackMemoryType &&
+               eptVpidCap.value().Fields.SupportPde2mbPages;
     }
 
 public:
@@ -124,13 +141,20 @@ public:
             return false;
         }
 
+        m_systemCr3 = GetSystemProcessCr3();
+        if (m_systemCr3 == 0)
+        {
+            LOG_ERROR("Failed to obtain the System process CR3.");
+            return false;
+        }
+
         m_processorCount = KeQueryActiveProcessorCount(NULL);
 
         // only works if we have fewer than 64 cores, which is a safe assumption for now.
         // if we had more than 64 cores, we would need to use processor groups (KeSetSystemGroupAffinityThread)
         UINT64 vcpuArraySize = sizeof(Vcpu) * m_processorCount;
         m_vcpuBuffer = PoolBuffer::allocate(
-            vcpuArraySize, POOL_FLAG_NON_PAGED, HYPERVISOR_CONFIG::VCPU_ARRAY_TAG);
+            vcpuArraySize, POOL_FLAG_NON_PAGED, POOL_TAGS::VCPU_ARRAY);
         if (!m_vcpuBuffer.has())
         {
             LOG_ERROR("Failed to allocate virtual CPU array.");
@@ -143,7 +167,7 @@ public:
         {
             ScopedAffinity affinity(processorIndex);
 
-            Optional<Vcpu> created = Vcpu::Create(processorIndex, m_ept.GetEptPointer());
+            Optional<Vcpu> created = Vcpu::Create(processorIndex, m_ept.GetEptPointer(), m_systemCr3);
             if (!created.has())
             {
                 LOG_ERROR("Initialization failed on core %lu. Aborting.", processorIndex);

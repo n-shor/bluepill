@@ -1,23 +1,23 @@
 #pragma once
 
 #include "constants.hpp"
+#include "structs.hpp"
 #include "utils.hpp"
 #include <intrin.h>
-#include <ntddk.h>
+#include <ntifs.h>
 
 class ContiguousMemory
 {
 private:
+    PVOID m_virtualAddress;
+    unsigned long long m_physicalAddress;
+
     ContiguousMemory(PVOID virtualAddress, unsigned long long physicalAddress)
         : m_virtualAddress(virtualAddress), m_physicalAddress(physicalAddress)
     {
     }
 
-    PVOID m_virtualAddress;
-    unsigned long long m_physicalAddress;
-
-public:
-    ~ContiguousMemory() noexcept
+    void Reset() noexcept
     {
         if (m_virtualAddress != nullptr)
         {
@@ -25,6 +25,12 @@ public:
             m_virtualAddress = nullptr;
             m_physicalAddress = 0;
         }
+    }
+
+public:
+    ~ContiguousMemory() noexcept
+    {
+        this->Reset();
     }
 
     ContiguousMemory(const ContiguousMemory&) = delete;
@@ -45,7 +51,7 @@ public:
             return *this;
         }
 
-        this->~ContiguousMemory();
+        this->Reset();
         m_virtualAddress = other.m_virtualAddress;
         m_physicalAddress = other.m_physicalAddress;
         other.m_virtualAddress = nullptr;
@@ -54,16 +60,20 @@ public:
         return *this;
     }
 
-    PVOID& VirtualAddress()
+    PVOID VirtualAddress()
     {
         return m_virtualAddress;
     }
 
-    const PVOID& VirtualAddress() const
+    const PVOID VirtualAddress() const
     {
         return m_virtualAddress;
     }
 
+    // we must return a reference here because we need to provide a pointer to this value when calling vmx instructions.
+    // if we returned by value instead, we would've gotten an rvalue which we cannot take the address of.
+    // note that this is a bit dangerous because the caller can modify this member and cause memory leaks
+    // or cause double frees, but we must return a reference here so they just need to be careful.
     unsigned long long& PhysicalAddress()
     {
         return m_physicalAddress;
@@ -95,22 +105,27 @@ public:
 class PoolBuffer
 {
 private:
+    PVOID m_pointer;
+    ULONG m_tag;
+
     PoolBuffer(PVOID pointer, ULONG tag) noexcept
         : m_pointer(pointer), m_tag(tag)
     {
     }
 
-    PVOID m_pointer;
-    ULONG m_tag;
-
-public:
-    ~PoolBuffer() noexcept
+    void Reset() noexcept
     {
         if (m_pointer != nullptr)
         {
             ExFreePoolWithTag(m_pointer, m_tag);
             m_pointer = nullptr;
         }
+    }
+
+public:
+    ~PoolBuffer() noexcept
+    {
+        this->Reset();
     }
 
     PoolBuffer(const PoolBuffer&) = delete;
@@ -129,7 +144,7 @@ public:
             return *this;
         }
 
-        this->~PoolBuffer();
+        this->Reset();
         m_pointer = other.m_pointer;
         m_tag = other.m_tag;
         other.m_pointer = nullptr;
@@ -137,11 +152,12 @@ public:
         return *this;
     }
 
-    PVOID& Pointer()
+    PVOID Pointer()
     {
         return m_pointer;
     }
-    const PVOID& Pointer() const
+
+    const PVOID Pointer() const
     {
         return m_pointer;
     }
@@ -158,8 +174,8 @@ public:
     }
 };
 
-// the point of this class is to create a GDT for our own use so the CPU's vmexit time
-// busy bit write on host TR will happen on our GDT rather than on windows' GDT, which would trigger patchguard
+// the point of this class is to create a GDT for our own use so the cached host TR limit won't be
+// affected, otherwise it would've disagreed with its TSS descriptor and could cause unexpected crashes
 class HostGdt
 {
 private:
@@ -198,6 +214,8 @@ public:
         return reinterpret_cast<UINT64>(m_memory.Pointer());
     }
 
+    // note that we don't call this function at all during VMCS initialization because the VMCS doesn't
+    // contain a host GDTR limit field (intel forces it to be 0xFFFF on every vmexit no matter what).
     UINT16 Limit() const noexcept
     {
         return m_limit;
@@ -208,7 +226,7 @@ public:
         UINT16 windowsTrSelector,
         UINT32 tssLimitForDescriptor)
     {
-        const UINT16 guestSize = guestGdtr.Limit + 1;
+        const size_t guestSize = guestGdtr.Limit + 1;
 
         if (guestSize > PAGE_SIZE)
         {
@@ -225,7 +243,7 @@ public:
         }
 
         Optional<PoolBuffer> memory = PoolBuffer::allocate(
-            PAGE_SIZE, POOL_FLAG_NON_PAGED, HYPERVISOR_CONFIG::HOST_GDT_TAG);
+            PAGE_SIZE, POOL_FLAG_NON_PAGED, POOL_TAGS::HOST_GDT);
         if (!memory.has())
         {
             LOG_ERROR("HostGdt: failed to allocate GDT memory.");
@@ -275,4 +293,72 @@ public:
 
 private:
     KAFFINITY m_oldAffinity;
+};
+
+// owns the buffer returned by MmGetPhysicalMemoryRanges. the buffer is caller
+// owned and must be released with ExFreePool.
+class PhysicalMemoryRanges
+{
+private:
+    explicit PhysicalMemoryRanges(PPHYSICAL_MEMORY_RANGE ranges) noexcept
+        : m_ranges(ranges)
+    {
+    }
+
+    PPHYSICAL_MEMORY_RANGE m_ranges;
+
+    void Reset() noexcept
+    {
+        if (m_ranges != nullptr)
+        {
+            ExFreePool(m_ranges);
+            m_ranges = nullptr;
+        }
+    }
+
+public:
+    ~PhysicalMemoryRanges() noexcept
+    {
+        Reset();
+    }
+
+    PhysicalMemoryRanges(const PhysicalMemoryRanges&) = delete;
+    PhysicalMemoryRanges& operator=(const PhysicalMemoryRanges&) = delete;
+
+    PhysicalMemoryRanges(PhysicalMemoryRanges&& other) noexcept
+        : m_ranges(other.m_ranges)
+    {
+        other.m_ranges = nullptr;
+    }
+
+    PhysicalMemoryRanges& operator=(PhysicalMemoryRanges&& other) noexcept
+    {
+        if (this == &other)
+        {
+            return *this;
+        }
+
+        Reset();
+        m_ranges = other.m_ranges;
+        other.m_ranges = nullptr;
+
+        return *this;
+    }
+
+    // the array is terminated by an entry whose NumberOfBytes is zero
+    PPHYSICAL_MEMORY_RANGE Ranges() const noexcept
+    {
+        return m_ranges;
+    }
+
+    static Optional<PhysicalMemoryRanges> query()
+    {
+        PPHYSICAL_MEMORY_RANGE ranges = MmGetPhysicalMemoryRanges();
+        if (ranges == nullptr)
+        {
+            return Optional<PhysicalMemoryRanges>();
+        }
+
+        return Optional<PhysicalMemoryRanges>(PhysicalMemoryRanges(ranges));
+    }
 };

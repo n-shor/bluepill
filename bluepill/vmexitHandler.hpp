@@ -54,7 +54,7 @@ inline void InjectGpFault()
 
 inline void InjectUdFault()
 {
-    InjectException(EXCEPTION_VECTORS::UD, false, NULL);
+    InjectException(EXCEPTION_VECTORS::UD, false, 0);
 }
 
 extern "C" __declspec(noreturn) void HandleVmresumeFailure()
@@ -135,12 +135,12 @@ extern "C" bool CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
             cpuInfo[CPUID_REGISTER::ECX] &= ~(CPUID_FEATURES::HYPERVISOR_PRESENT);
         }
 
-        // CPUID zero extends results to 64 bits in long mode, so the ULONG32 cast
+        // CPUID zero extends results to 64 bits in long mode, so the UINT32 cast
         // ensures we don't sign extend the int through to the registers' upper bits
-        GuestRegs->Rax = static_cast<ULONG32>(cpuInfo[CPUID_REGISTER::EAX]);
-        GuestRegs->Rbx = static_cast<ULONG32>(cpuInfo[CPUID_REGISTER::EBX]);
-        GuestRegs->Rcx = static_cast<ULONG32>(cpuInfo[CPUID_REGISTER::ECX]);
-        GuestRegs->Rdx = static_cast<ULONG32>(cpuInfo[CPUID_REGISTER::EDX]);
+        GuestRegs->Rax = static_cast<UINT32>(cpuInfo[CPUID_REGISTER::EAX]);
+        GuestRegs->Rbx = static_cast<UINT32>(cpuInfo[CPUID_REGISTER::EBX]);
+        GuestRegs->Rcx = static_cast<UINT32>(cpuInfo[CPUID_REGISTER::ECX]);
+        GuestRegs->Rdx = static_cast<UINT32>(cpuInfo[CPUID_REGISTER::EDX]);
 
         break;
     }
@@ -154,8 +154,8 @@ extern "C" bool CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
             break;
         }
 
-        const ULONG32 msrIndex = static_cast<ULONG32>(GuestRegs->Rcx);
-        const ULONG64 value = __readmsr(msrIndex);
+        const UINT32 msrIndex = static_cast<UINT32>(GuestRegs->Rcx);
+        const UINT64 value = __readmsr(msrIndex);
 
         GuestRegs->Rax = value & BITS_32::LOW_MASK;
         GuestRegs->Rdx = value >> BITS_32::HIGH_SHIFT;
@@ -171,8 +171,8 @@ extern "C" bool CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
             break;
         }
 
-        const ULONG32 msrIndex = static_cast<ULONG32>(GuestRegs->Rcx);
-        const ULONG64 value = (GuestRegs->Rax & BITS_32::LOW_MASK) | (GuestRegs->Rdx << BITS_32::HIGH_SHIFT);
+        const UINT32 msrIndex = static_cast<UINT32>(GuestRegs->Rcx);
+        const UINT64 value = (GuestRegs->Rax & BITS_32::LOW_MASK) | (GuestRegs->Rdx << BITS_32::HIGH_SHIFT);
 
         __writemsr(msrIndex, value);
 
@@ -187,8 +187,8 @@ extern "C" bool CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
             break;
         }
 
-        const ULONG32 xcrIndex = static_cast<ULONG32>(GuestRegs->Rcx);
-        const ULONG64 value = (GuestRegs->Rax & BITS_32::LOW_MASK) | (GuestRegs->Rdx << BITS_32::HIGH_SHIFT);
+        const UINT32 xcrIndex = static_cast<UINT32>(GuestRegs->Rcx);
+        const UINT64 value = (GuestRegs->Rax & BITS_32::LOW_MASK) | (GuestRegs->Rdx << BITS_32::HIGH_SHIFT);
 
         _xsetbv(xcrIndex, value);
 
@@ -237,7 +237,7 @@ extern "C" bool CppVmExitDispatcher(GUEST_REGISTERS* GuestRegs)
 #if DBG
         _enable();
         KeBugCheckEx(BUGCHECK_CODES::UNHANDLED_EXIT,
-                     static_cast<ULONG64>(exitReason), guestRip, 0, 0);
+                     static_cast<UINT64>(exitReason), guestRip, 0, 0);
 #endif
 
         break;

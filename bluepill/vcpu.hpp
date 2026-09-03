@@ -5,8 +5,9 @@
 #include "structs.hpp"
 #include "utils.hpp"
 #include "vmexitHandler.hpp"
+#include "vmxCapabilities.hpp"
 #include <intrin.h>
-#include <ntddk.h>
+#include <ntifs.h>
 
 #define VMCS_WRITE_SAFE(Field, Value)                                                                  \
     do                                                                                                 \
@@ -21,13 +22,14 @@
 class Vcpu;
 
 extern "C" bool AsmVirtualize(Vcpu* Context);
-extern "C" bool AsmVmExitHandler(Vcpu* Context);
+extern "C" bool AsmVmExitHandler();
 
 class Vcpu
 {
 private:
     ULONG m_processorIndex = 0;
     EPT_POINTER m_eptPointer = {};
+    UINT64 m_hostCr3 = 0;
 
     Optional<ContiguousMemory> m_vmxon;
     Optional<ContiguousMemory> m_vmcs;
@@ -38,6 +40,7 @@ private:
     bool m_vmxeEnabled = false;
     bool m_vmxonExecuted = false;
     bool m_isLaunched = false;
+    bool m_useTrueControlMsrs = false;
 
     Vcpu() = default;
 
@@ -53,6 +56,31 @@ private:
         m_vmxeEnabled = false;
     }
 
+    UINT64 ReadControlCapabilityMsr(IA32_VMX_MSR trueMsr, IA32_VMX_MSR legacyMsr) const noexcept
+    {
+        return VmxCapabilities::ReadControlMsr(m_useTrueControlMsrs, trueMsr, legacyMsr);
+    }
+
+    static bool IsYmmStateUsable() noexcept
+    {
+        int cpuInfo[CPUID_REGISTER::COUNT] = { 0 };
+        __cpuid(cpuInfo, CPUID_LEAF::VERSION_AND_FEATURES);
+
+        // OSXSAVE must be tested first as _xgetbv is itself illegal without it
+        if ((cpuInfo[CPUID_REGISTER::ECX] & CPUID_FEATURES::OSXSAVE) == 0)
+        {
+            return false;
+        }
+
+        if ((cpuInfo[CPUID_REGISTER::ECX] & CPUID_FEATURES::AVX) == 0)
+        {
+            return false;
+        }
+
+        const UINT64 xcr0 = _xgetbv(XCR0::INDEX);
+        return (xcr0 & XCR0::AVX_STATE) == XCR0::AVX_STATE;
+    }
+
 public:
     ~Vcpu() noexcept
     {
@@ -60,10 +88,18 @@ public:
 
         if (m_isLaunched)
         {
-            AsmVmcall(HYPERVISOR_CONFIG::SHUTDOWN_HYPERCALL, 0, 0, 0);
+            const UINT64 vmcsPhysicalAddress =
+                m_vmcs.has() ? m_vmcs.value().PhysicalAddress() : 0;
+
+            // the hypercall handles invalid addresses (0) accordingly
+            AsmVmcall(HYPERVISOR_CONFIG::SHUTDOWN_HYPERCALL, vmcsPhysicalAddress, 0, 0);
         }
         else if (m_vmxonExecuted)
         {
+            if (m_vmcs.has())
+            {
+                __vmx_vmclear(&m_vmcs.value().PhysicalAddress());
+            }
             __vmx_off();
         }
 
@@ -90,30 +126,43 @@ public:
           m_hypervisorStack(static_cast<Optional<PoolBuffer>&&>(other.m_hypervisorStack)),
           m_hostGdt(static_cast<Optional<HostGdt>&&>(other.m_hostGdt)),
           m_vmxeEnabled(other.m_vmxeEnabled), m_vmxonExecuted(other.m_vmxonExecuted),
-          m_isLaunched(other.m_isLaunched)
+          m_isLaunched(other.m_isLaunched), m_useTrueControlMsrs(other.m_useTrueControlMsrs),
+          m_hostCr3(other.m_hostCr3)
     {
         other.m_vmxeEnabled = false;
         other.m_vmxonExecuted = false;
         other.m_isLaunched = false;
+        other.m_useTrueControlMsrs = false;
+        other.m_hostCr3 = 0;
     }
 
     Vcpu& operator=(Vcpu&&) = delete;
 
     // needs to run while pinned to the specific core this VCPU object will be assigned to
-    static Optional<Vcpu> Create(const ULONG processorIndex, const EPT_POINTER eptPointer)
+    static Optional<Vcpu> Create(const ULONG processorIndex, const EPT_POINTER eptPointer, const UINT64 hostCr3)
     {
+        if (!IsYmmStateUsable())
+        {
+            LOG_ERROR("Core %lu cannot use YMM state (AVX / OSXSAVE / XCR0); "
+                      "the VM-exit handler's save-restore block requires it.",
+                      processorIndex);
+
+            return Optional<Vcpu>();
+        }
+
         Vcpu vcpu;
         vcpu.m_processorIndex = processorIndex;
         vcpu.m_eptPointer = eptPointer;
+        vcpu.m_hostCr3 = hostCr3;
 
         IA32_FEATURE_CONTROL_MSR featureControl = { 0 };
-        featureControl.All = __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_FEATURE_CONTROL));
+        featureControl.All = __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::FEATURE_CONTROL));
 
         if (featureControl.Fields.Lock == FALSE)
         {
             featureControl.Fields.Lock = TRUE;
             featureControl.Fields.EnableVMXON = TRUE;
-            __writemsr(static_cast<ULONG>(SYSTEM_MSR::IA32_FEATURE_CONTROL), featureControl.All);
+            __writemsr(static_cast<ULONG>(IA32_SYSTEM_MSR::FEATURE_CONTROL), featureControl.All);
         }
         else if (featureControl.Fields.EnableVMXON == FALSE)
         {
@@ -131,11 +180,13 @@ public:
         }
 
         IA32_VMX_BASIC_MSR vmxBasic = { 0 };
-        vmxBasic.All = __readmsr(static_cast<ULONG>(VMX_MSR::IA32_BASIC));
+        vmxBasic.All = __readmsr(static_cast<ULONG>(IA32_VMX_MSR::BASIC));
         ULONG revisionId = static_cast<ULONG>(vmxBasic.All);
 
         // writing the revision ID into the vmxon memory, this is necessary to ensure everything is compatible
         *(reinterpret_cast<ULONG*>(vcpu.m_vmxon.value().VirtualAddress())) = revisionId;
+
+        vcpu.m_useTrueControlMsrs = vmxBasic.Fields.SupportsTrueControlMsrs != 0;
 
         if (__vmx_on(&vcpu.m_vmxon.value().PhysicalAddress()) != VMX_RESULT::SUCCESS)
         {
@@ -173,7 +224,7 @@ public:
         }
 
         vcpu.m_hypervisorStack = PoolBuffer::allocate(
-            HYPERVISOR_CONFIG::STACK_SIZE, POOL_FLAG_NON_PAGED, HYPERVISOR_CONFIG::STACK_TAG);
+            HYPERVISOR_CONFIG::STACK_SIZE, POOL_FLAG_NON_PAGED, POOL_TAGS::STACK);
         if (!vcpu.m_hypervisorStack.has())
         {
             LOG_ERROR("Failed to allocate host stack.");
@@ -207,7 +258,7 @@ public:
         return Optional<Vcpu>(static_cast<Vcpu&&>(vcpu));
     }
 
-    static bool AdjustControlValue(ULONG requestedValue, ULONG64 msrValue, ULONG* outAdjustedValue)
+    static bool AdjustControlValue(ULONG requestedValue, UINT64 msrValue, ULONG* outAdjustedValue)
     {
         LARGE_INTEGER msr = { 0 };
         msr.QuadPart = msrValue;
@@ -229,7 +280,7 @@ public:
     }
 
     static SEGMENT_INFO
-    GetSegmentInfo(SEGMENT_SELECTOR selector, ULONG64 gdtBase)
+    GetSegmentInfo(SEGMENT_SELECTOR selector, UINT64 gdtBase)
     {
         SEGMENT_INFO segmentInfo = { 0 };
 
@@ -252,10 +303,10 @@ public:
             SYSTEM_SEGMENT_DESCRIPTOR_64* sysDescriptor = reinterpret_cast<SYSTEM_SEGMENT_DESCRIPTOR_64*>(
                 segmentDescriptor);
 
-            segmentInfo.Base |= (static_cast<ULONG64>(sysDescriptor->BaseUpper32) << BITS_32::HIGH_SHIFT);
+            segmentInfo.Base |= (static_cast<UINT64>(sysDescriptor->BaseUpper32) << BITS_32::HIGH_SHIFT);
         }
 
-        segmentInfo.Limit = static_cast<ULONG32>(
+        segmentInfo.Limit = static_cast<UINT32>(
             segmentDescriptor->Fields.LimitLow |
             (segmentDescriptor->Fields.LimitHigh << SEGMENT_SHIFTS::LIMIT_HIGH));
 
@@ -287,7 +338,7 @@ public:
         ULONG pinBasedControls = 0;
         if (!AdjustControlValue(
                 pinBasedRequest,
-                __readmsr(static_cast<ULONG>(VMX_MSR::IA32_TRUE_PINBASED_CTLS)),
+                ReadControlCapabilityMsr(IA32_VMX_MSR::TRUE_PINBASED_CTLS, IA32_VMX_MSR::PINBASED_CTLS),
                 &pinBasedControls))
         {
             LOG_ERROR("CPU does not support the requested Pin-Based Controls on core %lu.", m_processorIndex);
@@ -303,7 +354,8 @@ public:
         ULONG primaryControls = 0;
         if (!AdjustControlValue(
                 primaryControlsRequest,
-                __readmsr(static_cast<ULONG>(VMX_MSR::IA32_TRUE_PROCBASED_CTLS)), &primaryControls))
+                ReadControlCapabilityMsr(IA32_VMX_MSR::TRUE_PROCBASED_CTLS, IA32_VMX_MSR::PROCBASED_CTLS),
+                &primaryControls))
         {
             LOG_ERROR("CPU does not support the requested Primary Controls on core %lu.", m_processorIndex);
             return false;
@@ -321,7 +373,7 @@ public:
         ULONG secondaryControls = 0;
         if (!AdjustControlValue(
                 secondaryControlsRequest,
-                __readmsr(static_cast<ULONG>(VMX_MSR::IA32_PROCBASED_CTLS2)), &secondaryControls))
+                __readmsr(static_cast<ULONG>(IA32_VMX_MSR::PROCBASED_CTLS2)), &secondaryControls))
         {
             LOG_ERROR("CPU does not support the requested Secondary Controls on core %lu.", m_processorIndex);
             return false;
@@ -345,7 +397,7 @@ public:
         ULONG exitControls = 0;
         if (!AdjustControlValue(
                 exitRequest,
-                __readmsr(static_cast<ULONG>(VMX_MSR::IA32_TRUE_EXIT_CTLS)),
+                ReadControlCapabilityMsr(IA32_VMX_MSR::TRUE_EXIT_CTLS, IA32_VMX_MSR::EXIT_CTLS),
                 &exitControls))
         {
             LOG_ERROR("CPU does not support the requested VM-Exit Controls on core %lu.", m_processorIndex);
@@ -359,7 +411,7 @@ public:
         ULONG entryControls = 0;
         if (!AdjustControlValue(
                 entryRequest,
-                __readmsr(static_cast<ULONG>(VMX_MSR::IA32_TRUE_ENTRY_CTLS)),
+                ReadControlCapabilityMsr(IA32_VMX_MSR::TRUE_ENTRY_CTLS, IA32_VMX_MSR::ENTRY_CTLS),
                 &entryControls))
         {
             LOG_ERROR("CPU does not support the requested VM-Entry Controls on core %lu.", m_processorIndex);
@@ -380,7 +432,7 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_DR7, __readdr(7));
 
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_CR0, __readcr0());
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_CR3, __readcr3());
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_CR3, m_hostCr3);
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_CR4, __readcr4());
 
         static constexpr UINT64 NO_BITS = 0;
@@ -400,26 +452,33 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_SS_SELECTOR, AsmGetSs() & HOST_SEGMENT_SELECTOR_MASK);
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_TR_SELECTOR, AsmGetTr() & HOST_SEGMENT_SELECTOR_MASK);
 
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_FS_BASE, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_FS_BASE)));
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_GS_BASE, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_GS_BASE)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_FS_BASE, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::FS_BASE)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_GS_BASE, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::GS_BASE)));
 
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IA32_SYSENTER_CS, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_CS)));
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IA32_SYSENTER_ESP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_ESP)));
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IA32_SYSENTER_EIP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_EIP)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IA32_SYSENTER_CS, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::SYSENTER_CS)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IA32_SYSENTER_ESP, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::SYSENTER_ESP)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IA32_SYSENTER_EIP, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::SYSENTER_EIP)));
 
-        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_CS, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_CS)));
-        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_ESP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_ESP)));
-        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_EIP, __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_SYSENTER_EIP)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_CS, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::SYSENTER_CS)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_ESP, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::SYSENTER_ESP)));
+        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_SYSENTER_EIP, __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::SYSENTER_EIP)));
 
-        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RSP,
-                        reinterpret_cast<UINT64>(m_hypervisorStack.value().Pointer()) + HYPERVISOR_CONFIG::STACK_SIZE);
+        UINT8* stackTop = static_cast<UINT8*>(m_hypervisorStack.value().Pointer()) + HYPERVISOR_CONFIG::STACK_SIZE;
+
+        // using some of the host stack for our own storage
+        UINT64 stackBelowContext = reinterpret_cast<UINT64>(stackTop) - sizeof(HOST_STACK_CONTEXT);
+        // we must align the host stack - otherwise our alignment calculations in the asm code will not work properly
+        stackBelowContext &= ~(HOST_STACK::ALIGNMENT - 1ull);
+
+        VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RSP, stackBelowContext);
+
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_RIP, reinterpret_cast<UINT64>(AsmVmExitHandler));
 
         // setting up guest segment registers
 
         SYSTEM_DESCRIPTOR_TABLE_REGISTER gdtr = { 0 };
         AsmGetGdtr(&gdtr);
-        ULONG64 gdtBase = gdtr.Base;
+        UINT64 gdtBase = gdtr.Base;
 
         SEGMENT_SELECTOR cs = { AsmGetCs() };
         SEGMENT_SELECTOR ds = { AsmGetDs() };
@@ -471,14 +530,14 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_FS_LIMIT, fsInfo.Limit);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_FS_ACCESS_RIGHTS, fsInfo.AccessRights);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_FS_BASE,
-                        __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_FS_BASE)));
+                        __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::FS_BASE)));
 
         SEGMENT_INFO gsInfo = GetSegmentInfo(gs, gdtBase);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GS_SELECTOR, gs.All);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GS_LIMIT, gsInfo.Limit);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GS_ACCESS_RIGHTS, gsInfo.AccessRights);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GS_BASE,
-                        __readmsr(static_cast<ULONG>(SYSTEM_MSR::IA32_GS_BASE)));
+                        __readmsr(static_cast<ULONG>(IA32_SYSTEM_MSR::GS_BASE)));
 
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GDTR_BASE, gdtr.Base);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_GDTR_LIMIT, gdtr.Limit);
@@ -493,6 +552,15 @@ public:
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_IDTR_BASE, idtr.Base);
         VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_IDTR_LIMIT, idtr.Limit);
         VMCS_WRITE_SAFE(VMCS_FIELDS::HOST_IDTR_BASE, idtr.Base);
+
+        // setting up fields that need to be zeroed out to be safe (we don't want to assume
+        // we receive everything zeroed out in advance)
+        VMCS_WRITE_SAFE(VMCS_FIELDS::EXCEPTION_BITMAP, 0ull);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_ACTIVITY_STATE, 0ull);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_INTERRUPTIBILITY_STATE, 0ull);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::GUEST_PENDING_DEBUG_EXCEPTIONS, 0ull);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::VM_ENTRY_INTERRUPTION_INFO, 0ull);
+        VMCS_WRITE_SAFE(VMCS_FIELDS::CR3_TARGET_COUNT, 0ull);
 
         return true;
     }

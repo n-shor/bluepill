@@ -1,5 +1,5 @@
 #pragma once
-#include <ntddk.h>
+#include <ntifs.h>
 
 enum class VMCS_FIELDS : UINT64
 {
@@ -31,6 +31,7 @@ enum class VMCS_FIELDS : UINT64
     PIN_BASED_VM_EXEC_CONTROL = 0x00004000,
     PRIMARY_CPU_BASED_VM_EXEC_CONTROL = 0x00004002,
     EXCEPTION_BITMAP = 0x00004004,
+    CR3_TARGET_COUNT = 0x0000400A,
     VM_EXIT_CONTROLS = 0x0000400C,
     VM_ENTRY_CONTROLS = 0x00004012,
     VM_ENTRY_INTERRUPTION_INFO = 0x00004016,
@@ -60,6 +61,8 @@ enum class VMCS_FIELDS : UINT64
     GUEST_GS_ACCESS_RIGHTS = 0x0000481E,
     GUEST_LDTR_ACCESS_RIGHTS = 0x00004820,
     GUEST_TR_ACCESS_RIGHTS = 0x00004822,
+    GUEST_INTERRUPTIBILITY_STATE = 0x00004824,
+    GUEST_ACTIVITY_STATE = 0x00004826,
     GUEST_SYSENTER_CS = 0x0000482A,
 
     HOST_IA32_SYSENTER_CS = 0x00004C00,
@@ -88,6 +91,7 @@ enum class VMCS_FIELDS : UINT64
     GUEST_RIP = 0x0000681E,
     GUEST_DR7 = 0x0000681A,
     GUEST_RFLAGS = 0x00006820,
+    GUEST_PENDING_DEBUG_EXCEPTIONS = 0x00006822,
     GUEST_SYSENTER_ESP = 0x00006824,
     GUEST_SYSENTER_EIP = 0x00006826,
 
@@ -105,35 +109,53 @@ enum class VMCS_FIELDS : UINT64
     HOST_RIP = 0x00006C16,
 };
 
-enum class SYSTEM_MSR : UINT64
+enum class IA32_SYSTEM_MSR : UINT64
 {
-    IA32_FEATURE_CONTROL = 0x0000003A,
-    IA32_FS_BASE = 0xC0000100,
-    IA32_GS_BASE = 0xC0000101,
-    IA32_SYSENTER_CS = 0x00000174,
-    IA32_SYSENTER_ESP = 0x00000175,
-    IA32_SYSENTER_EIP = 0x00000176,
+    FEATURE_CONTROL = 0x0000003A,
+    FS_BASE = 0xC0000100,
+    GS_BASE = 0xC0000101,
+    SYSENTER_CS = 0x00000174,
+    SYSENTER_ESP = 0x00000175,
+    SYSENTER_EIP = 0x00000176,
 };
 
-enum class VMX_MSR : UINT64
+enum class IA32_VMX_MSR : UINT64
 {
-    IA32_BASIC = 0x00000480,
-    IA32_PROCBASED_CTLS2 = 0x0000048B,
-    IA32_EPT_VPID_CAP = 0x0000048C,
-    IA32_TRUE_PINBASED_CTLS = 0x0000048D,
-    IA32_TRUE_PROCBASED_CTLS = 0x0000048E,
-    IA32_TRUE_EXIT_CTLS = 0x0000048F,
-    IA32_TRUE_ENTRY_CTLS = 0x00000490,
+    BASIC = 0x00000480,
+    PINBASED_CTLS = 0x00000481,
+    PROCBASED_CTLS = 0x00000482,
+    EXIT_CTLS = 0x00000483,
+    ENTRY_CTLS = 0x00000484,
+    PROCBASED_CTLS2 = 0x0000048B,
+    EPT_VPID_CAP = 0x0000048C,
+    TRUE_PINBASED_CTLS = 0x0000048D,
+    TRUE_PROCBASED_CTLS = 0x0000048E,
+    TRUE_EXIT_CTLS = 0x0000048F,
+    TRUE_ENTRY_CTLS = 0x00000490,
 };
+
+namespace POOL_TAGS
+{
+#if DBG
+inline constexpr ULONG HYPERVISOR = 'pyhG';
+inline constexpr ULONG VCPU_ARRAY = 'upcV';
+inline constexpr ULONG STACK = 'kStS';
+inline constexpr ULONG HOST_GDT = 'tDGh';
+inline constexpr ULONG EPT_TABLE = 'TPEV';
+#else
+inline constexpr ULONG SHARED = 'lbtC';
+inline constexpr ULONG HYPERVISOR = SHARED;
+inline constexpr ULONG VCPU_ARRAY = SHARED;
+inline constexpr ULONG STACK = SHARED;
+inline constexpr ULONG HOST_GDT = SHARED;
+inline constexpr ULONG EPT_TABLE = SHARED;
+#endif
+} // namespace POOL_TAGS
 
 namespace HYPERVISOR_CONFIG
 {
 inline constexpr UINT64 STACK_SIZE = 0x8000;
 inline constexpr UINT64 SHUTDOWN_HYPERCALL = 0xDEADDEADDEADull;
-// change later as usual
-inline constexpr ULONG STACK_TAG = 'kStS';
-inline constexpr ULONG VCPU_ARRAY_TAG = 'llip';
-inline constexpr ULONG HOST_GDT_TAG = 'tDGh';
 } // namespace HYPERVISOR_CONFIG
 
 namespace HYPERVISOR_LEAVES
@@ -142,18 +164,31 @@ inline constexpr UINT64 VENDOR = 0x40000000;
 inline constexpr UINT64 INTERFACE = 0x40000001;
 } // namespace HYPERVISOR_LEAVES
 
-namespace HYPERVISOR_VENDOR_SIGNATURES
+// combines 4 given characters into a UINT32 representation of a string.
+// this is needed because writing the string in reversed order (like 'dcba')
+// is reliant on compiler implementation.
+inline consteval UINT32 PackSignature(char a, char b, char c, char d)
 {
-// this turns into "Microsoft Hv"
-inline constexpr UINT32 MICROSOFT_HYPER_V_EBX = 'rciM';
-inline constexpr UINT32 MICROSOFT_HYPER_V_ECX = 'foso';
-inline constexpr UINT32 MICROSOFT_HYPER_V_EDX = 'vH t';
-} // namespace HYPERVISOR_VENDOR_SIGNATURES
+    constexpr UINT32 BITS_IN_CHAR = 8;
+
+    return (static_cast<UINT32>(a)) |
+           (static_cast<UINT32>(b) << BITS_IN_CHAR) |
+           (static_cast<UINT32>(c) << (BITS_IN_CHAR + BITS_IN_CHAR)) |
+           (static_cast<UINT32>(d) << (BITS_IN_CHAR + BITS_IN_CHAR + BITS_IN_CHAR));
+}
 
 namespace HYPERVISOR_INTERFACE_SIGNATURES
 {
-inline constexpr UINT32 HYPER_V = '1#vH'; // turns into "Hv#1"
+inline constexpr UINT32 HYPER_V = PackSignature('H', 'v', '#', '1');
 } // namespace HYPERVISOR_INTERFACE_SIGNATURES
+
+namespace HYPERVISOR_VENDOR_SIGNATURES
+{
+// this turns into "Microsoft Hv"
+inline constexpr UINT32 MICROSOFT_HYPER_V_EBX = PackSignature('M', 'i', 'c', 'r');
+inline constexpr UINT32 MICROSOFT_HYPER_V_ECX = PackSignature('o', 's', 'o', 'f');
+inline constexpr UINT32 MICROSOFT_HYPER_V_EDX = PackSignature('t', ' ', 'H', 'v');
+} // namespace HYPERVISOR_VENDOR_SIGNATURES
 
 namespace CR4_FLAGS
 {
@@ -163,8 +198,22 @@ inline constexpr UINT64 VMXE = 1ull << 13;
 namespace CPUID_FEATURES
 {
 inline constexpr UINT64 VMX = 1ull << 5;
+inline constexpr UINT64 OSXSAVE = 1ull << 27;
+inline constexpr UINT64 AVX = 1ull << 28;
 inline constexpr UINT64 HYPERVISOR_PRESENT = 1ull << 31;
 } // namespace CPUID_FEATURES
+
+namespace XCR0
+{
+inline constexpr unsigned int INDEX = 0; // XCR0 = extended control register 0
+
+inline constexpr UINT64 X87 = 1ull << 0;
+inline constexpr UINT64 SSE = 1ull << 1;
+inline constexpr UINT64 YMM = 1ull << 2;
+
+// VEX encoded 256 bit instructions need both state components enabled
+inline constexpr UINT64 AVX_STATE = SSE | YMM;
+} // namespace XCR0
 
 namespace CPUID_REGISTER
 {
@@ -182,29 +231,29 @@ inline constexpr UINT64 VERSION_AND_FEATURES = 1;
 
 namespace PRIMARY_CONTROLS
 {
-inline constexpr ULONG32 RDTSC_EXITING = 1ul << 12;
-inline constexpr ULONG32 USE_TPR_SHADOW = 1ul << 21;
-inline constexpr ULONG32 USE_MSR_BITMAPS = 1ul << 28;
-inline constexpr ULONG32 ACTIVATE_SECONDARY_CONTROLS = 1ul << 31;
+inline constexpr UINT32 RDTSC_EXITING = 1ul << 12;
+inline constexpr UINT32 USE_TPR_SHADOW = 1ul << 21;
+inline constexpr UINT32 USE_MSR_BITMAPS = 1ul << 28;
+inline constexpr UINT32 ACTIVATE_SECONDARY_CONTROLS = 1ul << 31;
 } // namespace PRIMARY_CONTROLS
 
 namespace SECONDARY_CONTROLS
 {
-inline constexpr ULONG32 ENABLE_EPT = 1ul << 1;
-inline constexpr ULONG32 ENABLE_RDTSCP = 1ul << 3;
-inline constexpr ULONG32 ENABLE_VPID = 1ul << 5;
-inline constexpr ULONG32 ENABLE_INVPCID = 1ul << 12;
-inline constexpr ULONG32 ENABLE_XSAVES = 1ul << 20;
+inline constexpr UINT32 ENABLE_EPT = 1ul << 1;
+inline constexpr UINT32 ENABLE_RDTSCP = 1ul << 3;
+inline constexpr UINT32 ENABLE_VPID = 1ul << 5;
+inline constexpr UINT32 ENABLE_INVPCID = 1ul << 12;
+inline constexpr UINT32 ENABLE_XSAVES = 1ul << 20;
 } // namespace SECONDARY_CONTROLS
 
 namespace EXIT_CONTROLS
 {
-inline constexpr ULONG32 HOST_ADDRESS_SPACE_SIZE = 1ul << 9;
+inline constexpr UINT32 HOST_ADDRESS_SPACE_SIZE = 1ul << 9;
 } // namespace EXIT_CONTROLS
 
 namespace ENTRY_CONTROLS
 {
-inline constexpr ULONG32 IA32E_MODE_GUEST = 1ul << 9;
+inline constexpr UINT32 IA32E_MODE_GUEST = 1ul << 9;
 } // namespace ENTRY_CONTROLS
 
 namespace PHYSICAL_MEMORY
@@ -223,8 +272,6 @@ namespace EPT_CONFIG
 inline constexpr UINT64 PAGE_WALK_LENGTH_4 = 3;
 inline constexpr UINT64 MAX_ENTRY_COUNT = 512;
 inline constexpr UINT64 SIZE_2MB = 2ull * 1024 * 1024;
-// remember to change the pool tag to something less obvious later on
-inline constexpr ULONG POOL_TAG = 'TPEV';
 inline constexpr UINT64 VGA_MEMORY_START_PFN = 0xA0;
 inline constexpr UINT64 BIOS_MEMORY_END_PFN = 0xFF;
 } // namespace EPT_CONFIG

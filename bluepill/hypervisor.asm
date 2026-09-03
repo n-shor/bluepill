@@ -1,3 +1,17 @@
+INCLUDE vmcsFields.inc
+
+; ShutdownPath scratch layout. each descriptor slot is padded to 16 bytes so 
+; the whole block is a multiple of 16 and stack alignment is preserved.
+SHUTDOWN_SCRATCH_SIZE   EQU 48
+
+IDTR_SCRATCH_OFF        EQU 0
+GDTR_SCRATCH_OFF        EQU 16
+VMCS_ADDRESS_OFF        EQU 32
+
+; layout inside a 10 byte pseudo descriptor, as it's consumed by LGDT / LIDT
+DESCRIPTOR_LIMIT_OFF    EQU 0
+DESCRIPTOR_BASE_OFF     EQU 2
+
 .code
 
 EXTERN HandleVmresumeFailure:PROC
@@ -76,7 +90,7 @@ AsmVmExitHandler PROC
     push rax
     
     ; rsp now points directly to the saved rax (top of the saved GPRs).
-    ; Pass this context pointer to CppVmExitDispatcher via rcx.
+    ; we pass this context pointer to CppVmExitDispatcher via rcx.
     mov rcx, rsp
 
     sub rsp, 512
@@ -142,7 +156,7 @@ AsmVmExitHandler PROC
     vmresume
 
     ; if we reached this line, vmresume failed
-    sub rsp, 28h
+    sub rsp, 20h
     call HandleVmresumeFailure
     int 3   ; HandleVmresumeFailure is noreturn, but if it still returns we trap for debugging purposes
 
@@ -164,33 +178,57 @@ ShutdownPath:
     pop r14
     pop r15
 
+    ; one scratch block for everything that has to survive past VMXOFF
+    sub rsp, SHUTDOWN_SCRATCH_SIZE
+
+    ; rdx holds the VMCS physical address passed to the hypercall (0 if the
+    ; VMCS was somehow missing)
+    mov qword ptr [rsp + VMCS_ADDRESS_OFF], rdx
+
     ; reading resume info from this core's VMCS into volatile registers for later use
-    mov rcx, 681Eh           ; VMCS encoding for GUEST_RIP
+    mov rcx, GUEST_RIP
     vmread r10, rcx
 
-    mov rcx, 681Ch           ; VMCS encoding for GUEST_RSP
+    mov rcx, GUEST_RSP
     vmread r11, rcx
 
-    mov rcx, 6820h           ; VMCS encoding for GUEST_RFLAGS
+    mov rcx, GUEST_RFLAGS
     vmread rax, rcx
 
-    ; reading guest GDTR to a temporary 10 byte location on the host stack
-    sub rsp, 16                    ; reserve (we need 10 but use 16 for alignment)
-    
-    mov rcx, 6816h                 ; GUEST_GDTR_BASE
+    ; guest GDTR pseudo descriptor
+    mov rcx, GUEST_GDTR_BASE
     vmread rdx, rcx
-    mov qword ptr [rsp + 2], rdx
-    
-    mov rcx, 4810h                 ; GUEST_GDTR_LIMIT
+    mov qword ptr [rsp + GDTR_SCRATCH_OFF + DESCRIPTOR_BASE_OFF], rdx
+
+    mov rcx, GUEST_GDTR_LIMIT
     vmread rdx, rcx
-    mov word ptr [rsp], dx
-    
+    mov word ptr [rsp + GDTR_SCRATCH_OFF + DESCRIPTOR_LIMIT_OFF], dx
+
+    ; guest IDTR pseudo descriptor. the base already matches what windows had
+    ; (it's what we put in HOST_IDTR_BASE), but the limit was forced to 0FFFFh
+    ; by the VM exits and no HOST_IDTR_LIMIT field exists that could have held
+    ; the real one, so it has to come back out of the VMCS.
+    mov rcx, GUEST_IDTR_BASE
+    vmread rdx, rcx
+    mov qword ptr [rsp + IDTR_SCRATCH_OFF + DESCRIPTOR_BASE_OFF], rdx
+
+    mov rcx, GUEST_IDTR_LIMIT
+    vmread rdx, rcx
+    mov word ptr [rsp + IDTR_SCRATCH_OFF + DESCRIPTOR_LIMIT_OFF], dx
+
+    ; every vmread is done so the VMCS can be cleared now
+    cmp qword ptr [rsp + VMCS_ADDRESS_OFF], 0
+    jz SkipVmclear
+    vmclear qword ptr [rsp + VMCS_ADDRESS_OFF]
+
+SkipVmclear:
     vmxoff
     jc VmxoffFailed   ; CF=1 means vmxoff failed
     jz VmxoffFailed   ; ZF=1 & CF=0 means the operation is unsupported
 
-    ; restoring windows' GDTR before guest resumes
-    lgdt fword ptr [rsp]
+    ; restoring windows' descriptor tables before the guest resumes
+    lgdt fword ptr [rsp + GDTR_SCRATCH_OFF]
+    lidt fword ptr [rsp + IDTR_SCRATCH_OFF]
 
     ; switching to the guest's stack, restoring rflags, and jumping back to the
     ; instruction after vmcall (which is the ret inside AsmVmcall)
@@ -200,7 +238,7 @@ ShutdownPath:
     jmp r10
 
 VmxoffFailed:
-    sub rsp, 28h
+    sub rsp, 20h
     call HandleVmxoffFailure
     int 3
 

@@ -1,6 +1,6 @@
 #include "hypervisor.hpp"
 #include "utils.hpp"
-#include <ntddk.h>
+#include <ntifs.h>
 
 void __cdecl operator delete(void*, unsigned __int64)
 {
@@ -8,8 +8,6 @@ void __cdecl operator delete(void*, unsigned __int64)
 }
 
 Hypervisor* g_Hypervisor = nullptr;
-// change later to 'erhT' to make it less obvious
-static constexpr ULONG HYPER_TAG = 'pyhG';
 
 void DriverUnload(PDRIVER_OBJECT DriverObject)
 {
@@ -19,7 +17,7 @@ void DriverUnload(PDRIVER_OBJECT DriverObject)
     {
         g_Hypervisor->~Hypervisor();
 
-        ExFreePoolWithTag(g_Hypervisor, HYPER_TAG);
+        ExFreePoolWithTag(g_Hypervisor, POOL_TAGS::HYPERVISOR);
         g_Hypervisor = nullptr;
     }
 
@@ -33,7 +31,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     DriverObject->DriverUnload = DriverUnload;
     LOG_INFO("BluePill Hypervisor driver loading...");
 
-    PVOID rawMemory = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(Hypervisor), HYPER_TAG);
+    PVOID rawMemory = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(Hypervisor), POOL_TAGS::HYPERVISOR);
     if (rawMemory == nullptr)
     {
         LOG_ERROR("Failed to allocate memory for g_Hypervisor.");
@@ -45,7 +43,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     if (!g_Hypervisor->Start())
     {
         g_Hypervisor->~Hypervisor();
-        ExFreePoolWithTag(g_Hypervisor, HYPER_TAG);
+        ExFreePoolWithTag(g_Hypervisor, POOL_TAGS::HYPERVISOR);
         g_Hypervisor = nullptr;
 
         return STATUS_NOT_SUPPORTED;

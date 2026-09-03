@@ -1,9 +1,12 @@
 #pragma once
 
 #include "constants.hpp"
+#include "raii.hpp"
 #include "structs.hpp"
 #include "utils.hpp"
-#include <ntddk.h>
+#include "vmxCapabilities.hpp"
+#include <intrin.h>
+#include <ntifs.h>
 
 class VmmEpt
 {
@@ -15,6 +18,15 @@ public:
         this->EptPointer.All = 0;
         InitializeListHead(&this->TablesList);
     }
+
+    // currently we forbid copy/move constructors for EPT structures because it would cause a ton of issues
+    // (double frees, linked list corruption, and the list goes on). when the time comes and we need to
+    // implement per-core ept structures for ept hooking or similar features, we'll need to implement
+    // a separate function to clone the ept structures (we won't be using a copy constructor for this).
+    VmmEpt(const VmmEpt&) = delete;
+    VmmEpt& operator=(const VmmEpt&) = delete;
+    VmmEpt(VmmEpt&&) = delete;
+    VmmEpt& operator=(VmmEpt&&) = delete;
 
     ~VmmEpt()
     {
@@ -117,7 +129,7 @@ public:
             PEPT_PDE_2MB pdTable = static_cast<PEPT_PDE_2MB>(AllocateTrackedTable(&tablePhysicalAddress));
             if (!pdTable)
             {
-                LOG_ERROR("EPT INIT FAILED: Could not allocate PD table at index %zu.", pdptIndex);
+                LOG_ERROR("EPT INIT FAILED: Could not allocate PD table at index %llu.", pdptIndex);
                 return false;
             }
 
@@ -174,17 +186,19 @@ public:
         }
 
         // querying windows for valid RAM and marking those 2MB pages as write back
-        PPHYSICAL_MEMORY_RANGE memoryRanges = MmGetPhysicalMemoryRanges();
-        if (!memoryRanges)
+        Optional<PhysicalMemoryRanges> memoryRanges = PhysicalMemoryRanges::query();
+        if (!memoryRanges.has())
         {
             LOG_ERROR("EPT INIT FAILED: MmGetPhysicalMemoryRanges returned NULL.");
             return false;
         }
 
-        for (UINT64 i = 0; memoryRanges[i].NumberOfBytes.QuadPart != 0; ++i)
+        PPHYSICAL_MEMORY_RANGE ranges = memoryRanges.value().Ranges();
+
+        for (UINT64 i = 0; ranges[i].NumberOfBytes.QuadPart != 0; ++i)
         {
-            UINT64 startAddress = memoryRanges[i].BaseAddress.QuadPart;
-            UINT64 endAddress = startAddress + memoryRanges[i].NumberOfBytes.QuadPart;
+            UINT64 startAddress = ranges[i].BaseAddress.QuadPart;
+            UINT64 endAddress = startAddress + ranges[i].NumberOfBytes.QuadPart;
 
             // ranges might end mid 2MB page so we need to round up the exclusive end
             UINT64 startPfn2MB = startAddress / EPT_CONFIG::SIZE_2MB;
@@ -201,7 +215,7 @@ public:
                 UINT64 pdOffset = pfn & EPT_SHIFTS::INDEX_MASK;
 
                 PHYSICAL_ADDRESS pdPhysicalAddress;
-                pdPhysicalAddress.QuadPart = (static_cast<ULONG64>(pdptTable[pdptOffset].Fields.PageDirectoryAddress)) << PAGE_SHIFT;
+                pdPhysicalAddress.QuadPart = (static_cast<UINT64>(pdptTable[pdptOffset].Fields.PageDirectoryAddress)) << PAGE_SHIFT;
                 PEPT_PDE_2MB pdTable = static_cast<PEPT_PDE_2MB>(MmGetVirtualForPhysical(pdPhysicalAddress));
 
                 if (pdTable)
@@ -211,13 +225,15 @@ public:
             }
         }
 
-        ExFreePool(memoryRanges);
-
         // building final EPT pointer
         this->EptPointer.Fields.MemoryType = MEMORY_TYPES::WRITEBACK;
         this->EptPointer.Fields.PageWalkLength = EPT_CONFIG::PAGE_WALK_LENGTH_4;
-        this->EptPointer.Fields.DirtyAndAceessEnabled = 1;
         this->EptPointer.Fields.PageMapLevel4Address = (this->Pml4PhysicalAddress >> PAGE_SHIFT);
+
+        Optional<IA32_VMX_EPT_VPID_CAP_MSR> eptVpidCap = VmxCapabilities::TryReadEptVpidCap();
+
+        this->EptPointer.Fields.EnableAccessedAndDirtyFlags =
+            (eptVpidCap.has() && eptVpidCap.value().Fields.SupportAccessedAndDirtyFlag) ? 1 : 0;
 
         // forcing the cpu to commit all page table writes to the physical RAM
         // this is required for the hardware page walker before vmlaunch
@@ -246,7 +262,7 @@ public:
             {
                 MmFreeContiguousMemory(node->TableVa);
             }
-            ExFreePoolWithTag(node, EPT_CONFIG::POOL_TAG);
+            ExFreePoolWithTag(node, POOL_TAGS::EPT_TABLE);
         }
 
         if (this->Pml4VirtualAddress)
@@ -275,6 +291,11 @@ public:
             return nullptr;
         }
 
+        if (!IsEptEntryPresent(pd[pdIndex]))
+        {
+            return nullptr;
+        }
+
         // if it's still a large page, there's no PT to return
         PEPT_PDE_2MB pdLarge = reinterpret_cast<PEPT_PDE_2MB>(pd);
         if (pdLarge[pdIndex].Fields.LargePage == 1)
@@ -283,7 +304,7 @@ public:
         }
 
         PHYSICAL_ADDRESS ptPhysical;
-        ptPhysical.QuadPart = (static_cast<ULONG64>(pd[pdIndex].Fields.PageTableAddress)) << PAGE_SHIFT;
+        ptPhysical.QuadPart = (static_cast<UINT64>(pd[pdIndex].Fields.PageTableAddress)) << PAGE_SHIFT;
         PEPT_PTE ptTable = static_cast<PEPT_PTE>(MmGetVirtualForPhysical(ptPhysical));
         if (!ptTable)
         {
@@ -305,6 +326,12 @@ public:
             return nullptr;
         }
 
+        // LargePage is only meaningful on a present entry
+        if (!IsEptEntryPresent(pd[pdIndex]))
+        {
+            return nullptr;
+        }
+
         PEPT_PDE_2MB pdLarge = reinterpret_cast<PEPT_PDE_2MB>(pd);
         if (pdLarge[pdIndex].Fields.LargePage == 0)
         {
@@ -321,8 +348,8 @@ public:
     // PASSIVE_LEVEL. for runtime splitting from our vmexit handler, we need to
     // pre-split during initialization or to maintain a pre-allocated pool of page tables.
     //
-    // also, this function does NOT execute INVEPT. the caller is responsible since
-    // they know the right scope (all vcpus sharing this EPT need invalidation if we're post launch).
+    // also, this function does NOT execute INVEPT. the split alone doesn't require it, but
+    // the caller usually does after modifying the resulting entries, and only they know the right scope.
     bool SplitLargePage(UINT64 gpa)
     {
         PEPT_PDE pd = nullptr;
@@ -387,14 +414,23 @@ public:
         return true;
     }
 
-    // for convenience: split if needed, then return the 4KB PTE for this GPA. this is
-    // what hook install code typically needs
+    // ensures this GPA is mapped by a 4KB PTE and returns it. splits the covering
+    // 2MB large page first if one exists; returns the existing PTE if already split.
+    // returns null on failure.
+    //
+    // callers who modify the returned PTE are responsible for invalidating the
+    // stale translation with INVEPT (see SplitLargePage).
+    //
+    // post-launch callers should use INVEPT after the split and again after
+    // the modification. nothing is cached before vmlaunch, so init-time splitting
+    // needs neither.
     PEPT_PTE GetOrSplitPte(UINT64 gpa)
     {
         if (!SplitLargePage(gpa))
         {
             return nullptr;
         }
+
         return GetPteForGpa(gpa);
     }
 
@@ -440,7 +476,7 @@ private:
         }
 
         EptTableNode* node = static_cast<EptTableNode*>(
-            ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(EptTableNode), EPT_CONFIG::POOL_TAG));
+            ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(EptTableNode), POOL_TAGS::EPT_TABLE));
         if (!node)
         {
             MmFreeContiguousMemory(table);
@@ -451,6 +487,14 @@ private:
         InsertTailList(&this->TablesList, &node->ListEntry);
 
         return table;
+    }
+
+    template <typename TEntry>
+    static bool IsEptEntryPresent(const TEntry& entry) noexcept
+    {
+        return entry.Fields.ReadAccess != 0 ||
+               entry.Fields.WriteAccess != 0 ||
+               entry.Fields.ExecuteAccess != 0;
     }
 
     // walks PML4 -> PDPT -> PD and returns a pointer to the PD table plus the
@@ -468,21 +512,21 @@ private:
         }
 
         PEPT_PML4E pml4Entry = &this->Pml4VirtualAddress[pml4Index];
-        if (pml4Entry->Fields.ReadAccess == 0)
+        if (!IsEptEntryPresent(*pml4Entry))
         {
             return false;
         }
 
         PHYSICAL_ADDRESS pdptPhysical;
-        pdptPhysical.QuadPart = (static_cast<ULONG64>(pml4Entry->Fields.PageDirectoryPointerTableAddress)) << PAGE_SHIFT;
+        pdptPhysical.QuadPart = (static_cast<UINT64>(pml4Entry->Fields.PageDirectoryPointerTableAddress)) << PAGE_SHIFT;
         PEPT_PDPTE pdptTable = static_cast<PEPT_PDPTE>(MmGetVirtualForPhysical(pdptPhysical));
-        if (!pdptTable || pdptTable[pdptIndex].Fields.ReadAccess == 0)
+        if (!pdptTable || !IsEptEntryPresent(pdptTable[pdptIndex]))
         {
             return false;
         }
 
         PHYSICAL_ADDRESS pdPhysical;
-        pdPhysical.QuadPart = (static_cast<ULONG64>(pdptTable[pdptIndex].Fields.PageDirectoryAddress)) << PAGE_SHIFT;
+        pdPhysical.QuadPart = (static_cast<UINT64>(pdptTable[pdptIndex].Fields.PageDirectoryAddress)) << PAGE_SHIFT;
         PEPT_PDE pdTable = static_cast<PEPT_PDE>(MmGetVirtualForPhysical(pdPhysical));
         if (!pdTable)
         {

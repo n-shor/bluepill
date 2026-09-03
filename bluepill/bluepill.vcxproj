@@ -89,6 +89,10 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <ClCompile />
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <DisableSpecificWarnings>4189;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />
@@ -97,7 +101,6 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="contiguousMemory.hpp" />
     <ClInclude Include="ept.hpp" />
     <ClInclude Include="hypervisor.hpp" />
     <ClInclude Include="raii.hpp" />
@@ -106,6 +109,10 @@
     <ClInclude Include="vcpu.hpp" />
     <ClInclude Include="constants.hpp" />
     <ClInclude Include="vmexitHandler.hpp" />
+    <ClInclude Include="vmxCapabilities.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="vmcsFields.inc" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="customIntrinsics.asm">
